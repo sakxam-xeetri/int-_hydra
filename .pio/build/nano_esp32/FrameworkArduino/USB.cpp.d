@@ -1,14 +1,14 @@
 .pio/build/nano_esp32/FrameworkArduino/USB.cpp.o: \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/USB.cpp \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/USB.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/qio_qspi/include/sdkconfig.h \
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/qio_opi/include/sdkconfig.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/USBCDC.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/Stream.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/Print.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/WString.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/pgmspace.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/Printable.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/variants/esp32s3/pins_arduino.h \
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/variants/arduino_nano_nora/pins_arduino.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-log.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-matrix.h \

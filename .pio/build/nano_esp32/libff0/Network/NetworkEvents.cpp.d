@@ -1,7 +1,7 @@
 .pio/build/nano_esp32/libff0/Network/NetworkEvents.cpp.o: \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/Network/src/NetworkEvents.cpp \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/Network/src/NetworkEvents.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/qio_qspi/include/sdkconfig.h \
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/qio_opi/include/sdkconfig.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/Network/src/NetworkManager.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/Network/src/NetworkInterface.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
@@ -10,7 +10,7 @@
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/stdlib_noniso.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/binary.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/extra_attr.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/variants/esp32s3/pins_arduino.h \
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/variants/arduino_nano_nora/pins_arduino.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal.h \

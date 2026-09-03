@@ -1,6 +1,6 @@
 .pio/build/nano_esp32/FrameworkArduino/HardwareSerial.cpp.o: \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/HardwareSerial.cpp \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/variants/esp32s3/pins_arduino.h \
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/variants/arduino_nano_nora/pins_arduino.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp_arduino_version.h \

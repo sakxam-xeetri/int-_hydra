@@ -1,12 +1,12 @@
 .pio/build/nano_esp32/FrameworkArduino/esp32-hal-tinyusb.c.o: \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-tinyusb.c \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/qio_qspi/include/sdkconfig.h \
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/qio_opi/include/sdkconfig.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-log.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-matrix.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-uart.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-gpio.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/variants/esp32s3/pins_arduino.h \
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/variants/arduino_nano_nora/pins_arduino.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-touch.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-touch-ng.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-dac.h \
