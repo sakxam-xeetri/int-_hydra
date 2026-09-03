@@ -52,6 +52,12 @@ const char* otaPassword   = "admin";
 /* ====================================================================
  * 2. HARDWARE PIN DEFINITIONS
  * ==================================================================== */
+// Onboard Status LED Indicator (GPIO 2 on ESP32 Dev Module / WROOM-32)
+#ifndef LED_BUILTIN
+  #define LED_BUILTIN 2
+#endif
+#define ONBOARD_LED_PIN LED_BUILTIN
+
 // NEO-6M GPS Module connected to Hardware Serial 2
 #define GPS_RX_PIN 16 // ESP32 GPIO16 (RX2) -> Connect to GPS TX
 #define GPS_TX_PIN 17 // ESP32 GPIO17 (TX2) -> Connect to GPS RX
@@ -1111,22 +1117,31 @@ void setup() {
   // Initialize I2C and MPU-6050 IMU
   initMPU6050();
 
+  // Initialize Onboard LED (blinks while connecting, glows solid once connected)
+  pinMode(ONBOARD_LED_PIN, OUTPUT);
+  digitalWrite(ONBOARD_LED_PIN, LOW);
+
   // Connect to Wi-Fi
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.printf("[WIFI] Connecting to '%s'", WIFI_SSID);
 
   unsigned long startAttemptTime = millis();
+  bool blinkState = false;
   while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
     delay(500);
+    blinkState = !blinkState;
+    digitalWrite(ONBOARD_LED_PIN, blinkState ? HIGH : LOW);
     Serial.print(".");
   }
   Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(ONBOARD_LED_PIN, HIGH); // Solid ON when Wi-Fi is connected
     Serial.print("[WIFI] Connected! Assigned IP: ");
     Serial.println(WiFi.localIP());
   } else {
+    digitalWrite(ONBOARD_LED_PIN, LOW);
     Serial.println("[WIFI] Connection timed out. Starting SoftAP Fallback...");
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASSWORD);
@@ -1160,6 +1175,13 @@ void setup() {
 void loop() {
   server.handleClient();
   ArduinoOTA.handle();
+
+  // Onboard LED Status Indicator: Glows SOLID when Wi-Fi is connected
+  if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(ONBOARD_LED_PIN, HIGH); // Solid ON when Wi-Fi is connected
+  } else {
+    digitalWrite(ONBOARD_LED_PIN, (millis() % 1000 < 150) ? HIGH : LOW); // Short pulse if disconnected
+  }
 
   // Feed GPS parser from Hardware Serial 2 & track arrival time
   while (gpsSerial.available() > 0) {
