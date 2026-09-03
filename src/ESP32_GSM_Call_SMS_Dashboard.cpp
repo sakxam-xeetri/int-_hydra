@@ -130,6 +130,13 @@ unsigned long lastStatusCheck = 0;
 const unsigned long STATUS_CHECK_INTERVAL_MS = 6000;
 bool isOperationInProgress = false;
 
+// Function Prototypes
+bool gsmMakeCall(String phoneNumber);
+bool gsmSendSMS(String phoneNumber, String message);
+bool gsmHangupCall();
+bool triggerAlert(String node, String level, String msg, String targetNum, bool doCall, bool doSms);
+void clearAlert();
+
 /* ====================================================================
  * 4. LED & HARDWARE OUTPUT ROUTINES (NON-BLOCKING STATE MACHINE)
  * ==================================================================== */
@@ -531,7 +538,7 @@ void pollLevel1CloudServer() {
     cloudPollConnected = true;
     String payload = http.getString();
 
-    DynamicJsonDocument doc(4096);
+    JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload);
 
     if (!error && doc["status"] == "SUCCESS") {
@@ -579,7 +586,7 @@ void pollLevel1CloudServer() {
         }
       }
 
-      if (data.containsKey("breach_summary") && !data["breach_summary"].isNull()) {
+      if (!data["breach_summary"].isNull()) {
         cloudBreachSummary = data["breach_summary"].as<String>();
       } else {
         cloudBreachSummary = "NOMINAL";
