@@ -1,11 +1,12 @@
 /* ====================================================================
- * ESP32 + GSM MODULE (SIM800L / SIM900 / SIM7600 / A6) CALL & SMS GATEWAY
- * Microcontroller : ESP32 (Dev Module / WROOM-32 / ESP32-S3)
- * GSM Module      : SIM800L / SIM900 / SIM800C / SIM7600
- * Communication   : Hardware Serial 2 (GPIO 16 RX2, GPIO 17 TX2 @ 9600 Baud)
- * Wi-Fi           : SSID "sakshyam" | Password "sakshyam"
- * UI Theme        : Stark Monochrome High-Contrast (Black & White, 0px Radius)
- * Features        : Web-Triggered Phone Calls, SMS Sender, Signal Meter, Live AT Console
+ * ARDUINO / PLATFORMIO ESP32 SENSOR TELEMETRY & DUAL OTA WEB SERVER
+ * Microcontroller : ESP32 (Dev Module / WROOM-32)
+ * Sensors         : NEO-6M GPS (Hardware Serial 2) + MPU-6050 6-DOF IMU (I2C)
+ * Aesthetics      : Stark Monochrome (Pure Black & White, 0px Radius)
+ * Data Integrity  : 100% Genuine Sensor Readings (Zero Fake / Mock Data)
+ * GPS Diagnostics : Live Hardware Alive Check & Constellation Search Monitor
+ * OTA Features    : 1) Browser Web OTA at /update
+ *                   2) Network ArduinoOTA for IDE & PlatformIO
  * ==================================================================== */
 
 #include <Arduino.h>
@@ -14,837 +15,335 @@
 #include <ESPmDNS.h>
 #include <Update.h>
 #include <ArduinoOTA.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <TinyGPSPlus.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 
 /* ====================================================================
- * 1. WI-FI & OTA CONFIGURATION
+ * 1. WI-FI, SERVER & OTA CONFIGURATION
  * ==================================================================== */
+// Local Wi-Fi router credentials
 const char* WIFI_SSID     = "sakshyam";
 const char* WIFI_PASSWORD = "sakshyam";
 
+// HYDRA Server API Ingest Configuration (from a.md / Section 1 & 2.C)
+// Production Endpoint
+const char* SERVER_API_URL  = "https://zenithkandel.com.np/hydra/backend/api/telemetry/landslide.php";
+// Local Development / Raspberry Pi Fallback (uncomment to use local server)
+// const char* SERVER_API_URL = "http://192.168.1.100/codes/hydra/backend/api/telemetry/landslide.php";
+
+const char* NODE_UID        = "NODE-LANDSLIDE-01";
+const unsigned long TELEMETRY_SEND_INTERVAL_MS = 2000; // Cadence: every 2.0s (1 to 2s per a.md)
+
 // Fallback Access Point (AP) if router is out of range
-const char* AP_SSID       = "ESP32-GSM-GATEWAY";
-const char* AP_PASSWORD   = "12345678";
+const char* AP_SSID       = "ESP32-TELEMETRY";
+const char* AP_PASSWORD   = "12345678"; // minimum 8 characters
 
-// mDNS Hostname (Access via http://esp32-gsm.local)
-const char* MDNS_HOSTNAME = "esp32-gsm";
+// mDNS Hostname (Access at http://esp32-telemetry.local)
+const char* MDNS_HOSTNAME = "esp32-telemetry";
 
-// OTA Credentials (used at /update)
+// OTA Security Credentials (used for both Web OTA /update and ArduinoOTA)
 const char* otaUsername   = "admin";
 const char* otaPassword   = "admin";
 
 /* ====================================================================
  * 2. HARDWARE PIN DEFINITIONS
  * ==================================================================== */
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-  #define GSM_RX_PIN 4   // ESP32-S3 GPIO 4 -> Connect to GSM Module TX
-  #define GSM_TX_PIN 5   // ESP32-S3 GPIO 5 -> Connect to GSM Module RX
-  #define GSM_UART_NUM 1
-#else
-  #define GSM_RX_PIN 16  // Standard ESP32 GPIO 16 (RX2) -> Connect to GSM Module TX
-  #define GSM_TX_PIN 17  // Standard ESP32 GPIO 17 (TX2) -> Connect to GSM Module RX
-  #define GSM_UART_NUM 2
+// Onboard Status LED Indicator (GPIO 2 on ESP32 Dev Module / WROOM-32)
+#ifndef LED_BUILTIN
+  #define LED_BUILTIN 2
 #endif
+#define ONBOARD_LED_PIN LED_BUILTIN
 
-#define GSM_BAUD_RATE 9600
+// NEO-6M GPS Module connected to Hardware Serial 2
+#define GPS_RX_PIN 16 // ESP32 GPIO16 (RX2) -> Connect to GPS TX
+#define GPS_TX_PIN 17 // ESP32 GPIO17 (TX2) -> Connect to GPS RX
+#define GPS_BAUD   9600
+
+// MPU-6050 IMU connected to Hardware I2C (Wire)
+#define I2C_SDA_PIN 21 // ESP32 GPIO21 -> Connect to MPU6050 SDA
+#define I2C_SCL_PIN 22 // ESP32 GPIO22 -> Connect to MPU6050 SCL
 
 /* ====================================================================
  * 3. GLOBAL OBJECTS & STATE
  * ==================================================================== */
 WebServer server(80);
-HardwareSerial gsmSerial(GSM_UART_NUM);
+HardwareSerial gpsSerial(2);
+TinyGPSPlus gps;
+Adafruit_MPU6050 mpu;
 
-// GSM Status State
-bool isGsmAlive = false;
-int  gsmRssi = 99;           // 0 - 31 (99 = unknown / not detectable)
-int  gsmSignalPercent = 0;   // 0 - 100%
-int  gsmSignalDbm = -115;    // dBm estimate
-int  gsmNetworkReg = 0;      // 0 = Not registered, 1 = Home, 2 = Searching, 5 = Roaming
-String gsmOperator = "UNKNOWN";
-String gsmStatusText = "INITIALIZING MODEM...";
+bool mpuConnected = false;
+unsigned long lastGpsByteMillis = 0; // Tracks live UART reception from GPS
+unsigned long lastSensorReadTime = 0;
+const unsigned long SENSOR_INTERVAL_MS = 100; // Read IMU at 10 Hz
 
-// Call State
-String activeCallState = "IDLE";
-String lastCalledNumber = "";
+// Server Telemetry Uplink State
+unsigned long lastServerSendMillis = 0;
+int lastServerHttpCode = 0;
+unsigned long lastServerDurationMs = 0;
+unsigned long serverSuccessCount = 0;
+unsigned long serverFailCount = 0;
+String lastServerResponse = "WAITING FOR FIRST UPLINK";
 
-// Recent Action Feedback
-String lastActionResult = "GATEWAY READY";
-bool lastActionSuccess = true;
-unsigned long lastActionTime = 0;
-
-// Rolling AT Console Log (circular buffer)
-const int MAX_LOG_LINES = 15;
-String logLines[MAX_LOG_LINES];
-int logIndex = 0;
-
-// Periodic status check
-unsigned long lastStatusCheck = 0;
-const unsigned long STATUS_CHECK_INTERVAL_MS = 6000;
-bool isOperationInProgress = false;
-
-/* ====================================================================
- * 4. AT COMMAND HELPER & CONSOLE LOGGING
- * ==================================================================== */
-
-void addLog(String text) {
-  text.trim();
-  if (text.length() == 0) return;
-  
-  text.replace("\r", " ");
-  text.replace("\n", " ");
-  while (text.indexOf("  ") >= 0) text.replace("  ", " ");
-
-  logLines[logIndex] = text;
-  logIndex = (logIndex + 1) % MAX_LOG_LINES;
-  Serial.println("[GSM LOG] " + text);
-}
-
-String sendATCommand(String cmd, unsigned long timeoutMs = 2000, String expectedReply = "OK") {
-  while (gsmSerial.available()) gsmSerial.read();
-
-  addLog("> " + cmd);
-  gsmSerial.print(cmd + "\r\n");
-
-  String response = "";
-  unsigned long start = millis();
-  
-  while (millis() - start < timeoutMs) {
-    while (gsmSerial.available()) {
-      char c = gsmSerial.read();
-      response += c;
-    }
-    if (expectedReply.length() > 0 && response.indexOf(expectedReply) >= 0) {
-      break;
-    }
-  }
-
-  response.trim();
-  if (response.length() > 0) {
-    addLog("< " + response);
-  }
-  return response;
-}
+struct MPUData {
+  float ax, ay, az;         // Acceleration in m/s^2
+  float ax_g, ay_g, az_g;   // Acceleration in g (1g = 9.80665 m/s^2)
+  float total_accel_g;      // Vector magnitude
+  float gx, gy, gz;         // Gyro in deg/s
+  float gx_rad, gy_rad, gz_rad; // Gyro in rad/s
+  float temp_c;             // Temperature in °C
+  float temp_f;             // Temperature in °F
+  float pitch;              // Pitch angle (degrees)
+  float roll;               // Roll angle (degrees)
+} mpuData;
 
 /* ====================================================================
- * 5. GSM HARDWARE ROUTINES (CALL, SMS, NETWORK STATUS)
- * ==================================================================== */
-
-void queryGsmStatus() {
-  if (isOperationInProgress) return;
-
-  String atResp = sendATCommand("AT", 1000);
-  if (atResp.indexOf("OK") >= 0) {
-    isGsmAlive = true;
-  } else {
-    isGsmAlive = false;
-    gsmStatusText = "NO RESPONSE FROM GSM MODULE (CHECK POWER & WIRING)";
-    return;
-  }
-
-  String csqResp = sendATCommand("AT+CSQ", 1500);
-  int csqIdx = csqResp.indexOf("+CSQ:");
-  if (csqIdx >= 0) {
-    int commaIdx = csqResp.indexOf(",", csqIdx);
-    if (commaIdx > csqIdx) {
-      String rssiStr = csqResp.substring(csqIdx + 5, commaIdx);
-      rssiStr.trim();
-      gsmRssi = rssiStr.toInt();
-      if (gsmRssi >= 0 && gsmRssi <= 31) {
-        gsmSignalDbm = -113 + (gsmRssi * 2);
-        gsmSignalPercent = map(gsmRssi, 0, 31, 0, 100);
-      } else {
-        gsmSignalDbm = -115;
-        gsmSignalPercent = 0;
-      }
-    }
-  }
-
-  String cregResp = sendATCommand("AT+CREG?", 1500);
-  int cregIdx = cregResp.indexOf("+CREG:");
-  if (cregIdx >= 0) {
-    int commaIdx = cregResp.indexOf(",", cregIdx);
-    if (commaIdx > cregIdx && commaIdx + 1 < cregResp.length()) {
-      gsmNetworkReg = cregResp.substring(commaIdx + 1, commaIdx + 2).toInt();
-    }
-  }
-
-  String copsResp = sendATCommand("AT+COPS?", 2000);
-  int quote1 = copsResp.indexOf("\"");
-  if (quote1 >= 0) {
-    int quote2 = copsResp.indexOf("\"", quote1 + 1);
-    if (quote2 > quote1) {
-      gsmOperator = copsResp.substring(quote1 + 1, quote2);
-    }
-  }
-
-  if (gsmNetworkReg == 1) {
-    gsmStatusText = "CONNECTED (HOME NETWORK)";
-  } else if (gsmNetworkReg == 5) {
-    gsmStatusText = "CONNECTED (ROAMING)";
-  } else if (gsmNetworkReg == 2) {
-    gsmStatusText = "SEARCHING FOR CELLULAR TOWER...";
-  } else if (gsmNetworkReg == 3) {
-    gsmStatusText = "REGISTRATION DENIED BY CARRIER";
-  } else {
-    gsmStatusText = "NOT REGISTERED / NO SIM CARD";
-  }
-}
-
-bool gsmMakeCall(String phoneNumber) {
-  isOperationInProgress = true;
-  phoneNumber.trim();
-  phoneNumber.replace(" ", "");
-  phoneNumber.replace("-", "");
-
-  if (phoneNumber.length() < 3) {
-    lastActionResult = "ERROR: INVALID PHONE NUMBER";
-    lastActionSuccess = false;
-    isOperationInProgress = false;
-    return false;
-  }
-
-  addLog("[CALL] Dialing: " + phoneNumber);
-  activeCallState = "DIALING " + phoneNumber + "...";
-
-  String resp = sendATCommand("ATD" + phoneNumber + ";", 5000);
-
-  if (resp.indexOf("OK") >= 0 || resp.indexOf("VOICE") >= 0) {
-    activeCallState = "CALL IN PROGRESS &bull; " + phoneNumber;
-    lastActionResult = "CALL INITIATED TO " + phoneNumber;
-    lastCalledNumber = phoneNumber;
-    lastActionSuccess = true;
-  } else if (resp.indexOf("NO CARRIER") >= 0) {
-    activeCallState = "IDLE (CALL REJECTED / NO CARRIER)";
-    lastActionResult = "CALL FAILED: NO CARRIER";
-    lastActionSuccess = false;
-  } else if (resp.indexOf("BUSY") >= 0) {
-    activeCallState = "IDLE (LINE BUSY)";
-    lastActionResult = "CALL FAILED: LINE BUSY";
-    lastActionSuccess = false;
-  } else {
-    activeCallState = "DIALED (CHECK HANDSET)";
-    lastActionResult = "COMMAND SENT: " + resp;
-    lastActionSuccess = true;
-  }
-
-  lastActionTime = millis();
-  isOperationInProgress = false;
-  return lastActionSuccess;
-}
-
-bool gsmHangupCall() {
-  isOperationInProgress = true;
-  addLog("[CALL] Hanging up call...");
-  String resp = sendATCommand("ATH", 3000);
-
-  activeCallState = "IDLE (CALL ENDED)";
-  lastActionResult = "CALL TERMINATED (ATH OK)";
-  lastActionSuccess = true;
-  lastActionTime = millis();
-  isOperationInProgress = false;
-  return true;
-}
-
-bool gsmSendSMS(String phoneNumber, String message) {
-  isOperationInProgress = true;
-  phoneNumber.trim();
-  phoneNumber.replace(" ", "");
-  phoneNumber.replace("-", "");
-  message.trim();
-
-  if (phoneNumber.length() < 3 || message.length() == 0) {
-    lastActionResult = "ERROR: PHONE NUMBER OR MESSAGE CANNOT BE EMPTY";
-    lastActionSuccess = false;
-    isOperationInProgress = false;
-    return false;
-  }
-
-  addLog("[SMS] Setting Text Mode (AT+CMGF=1)...");
-  sendATCommand("AT+CMGF=1", 1500, "OK");
-  sendATCommand("AT+CSCS=\"GSM\"", 1000, "OK");
-
-  while (gsmSerial.available()) gsmSerial.read();
-
-  String cmgsCmd = "AT+CMGS=\"" + phoneNumber + "\"";
-  addLog("> " + cmgsCmd);
-  gsmSerial.print(cmgsCmd + "\r\n");
-
-  unsigned long startPrompt = millis();
-  bool gotPrompt = false;
-  while (millis() - startPrompt < 5000) {
-    if (gsmSerial.available()) {
-      char c = gsmSerial.read();
-      if (c == '>') {
-        gotPrompt = true;
-        break;
-      }
-    }
-  }
-
-  if (!gotPrompt) {
-    addLog("< ERROR: NO PROMPT '>' FROM MODEM");
-    lastActionResult = "SMS FAILED: MODEM DID NOT RETURN PROMPT '>'";
-    lastActionSuccess = false;
-    gsmSerial.write(0x1B);
-    isOperationInProgress = false;
-    return false;
-  }
-
-  addLog("> [SENDING MESSAGE BODY + CTRL+Z]...");
-  gsmSerial.print(message);
-  gsmSerial.write(0x1A);
-
-  String smsResp = "";
-  unsigned long startDelivery = millis();
-  while (millis() - startDelivery < 15000) {
-    while (gsmSerial.available()) {
-      char c = gsmSerial.read();
-      smsResp += c;
-    }
-    if (smsResp.indexOf("OK") >= 0 || smsResp.indexOf("ERROR") >= 0) {
-      break;
-    }
-  }
-
-  smsResp.trim();
-  addLog("< " + smsResp);
-
-  if (smsResp.indexOf("+CMGS:") >= 0 || smsResp.indexOf("OK") >= 0) {
-    lastActionResult = "SMS SENT SUCCESSFULLY TO " + phoneNumber;
-    lastActionSuccess = true;
-  } else {
-    lastActionResult = "SMS FAILED: " + smsResp;
-    lastActionSuccess = false;
-  }
-
-  lastActionTime = millis();
-  isOperationInProgress = false;
-  return lastActionSuccess;
-}
-
-/* ====================================================================
- * 6. EMBEDDED SHARP MONOCHROME WEB DASHBOARD HTML
+ * 4. EMBEDDED SHARP MONOCHROME DASHBOARD HTML
  * ==================================================================== */
 const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ESP32 // CELLULAR GSM GATEWAY</title>
+  <title>ESP32 // TELEMETRY NODE</title>
   <style>
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      border-radius: 0 !important;
-    }
-
-    body {
-      background-color: #000000;
-      color: #FFFFFF;
-      font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, "Courier New", monospace;
-      padding: 16px;
-      line-height: 1.35;
-      -webkit-font-smoothing: antialiased;
-    }
-
-    .container {
-      max-width: 960px;
-      margin: 0 auto;
-    }
-
-    header {
-      border: 1px solid #FFFFFF;
-      padding: 16px;
-      margin-bottom: 16px;
-      background: #050505;
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .title-group h1 {
-      font-size: 17px;
-      letter-spacing: 2px;
-      font-weight: 900;
-      text-transform: uppercase;
-    }
-
-    .title-group p {
-      font-size: 11px;
-      color: #888888;
-      letter-spacing: 1px;
-      margin-top: 3px;
-    }
-
-    .badges {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      align-items: center;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 8px;
-      font-size: 11px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      border: 1px solid #FFFFFF;
-      text-decoration: none;
-    }
-
+    * { box-sizing: border-box; margin: 0; padding: 0; border-radius: 0 !important; }
+    body { background-color: #000000; color: #FFFFFF; font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, "Courier New", monospace; padding: 16px; line-height: 1.35; -webkit-font-smoothing: antialiased; }
+    .container { max-width: 1200px; margin: 0 auto; }
+    header { border: 1px solid #FFFFFF; padding: 16px; margin-bottom: 16px; background: #050505; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; }
+    .title-group h1 { font-size: 18px; letter-spacing: 2px; font-weight: 900; text-transform: uppercase; }
+    .title-group p { font-size: 11px; color: #888888; letter-spacing: 1px; margin-top: 2px; }
+    .sys-badges { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; border: 1px solid #FFFFFF; text-decoration: none; }
     .badge.solid { background: #FFFFFF; color: #000000; }
     .badge.outline { background: #000000; color: #FFFFFF; }
-    .badge.warn { border-style: dashed; background: #1A1A1A; color: #FFFFFF; }
-    .badge.link { background: #000000; color: #FFFFFF; cursor: pointer; }
+    .badge.warn { border-style: dashed; color: #FFFFFF; background: #1A1A1A; }
+    .badge.link { background: #000000; color: #FFFFFF; border-color: #FFFFFF; cursor: pointer; }
     .badge.link:hover { background: #FFFFFF; color: #000000; }
-
-    .pulse {
-      display: inline-block;
-      width: 8px;
-      height: 8px;
-      background: #000000;
-      animation: blink 1s steps(1) infinite;
-    }
-
+    .pulse { display: inline-block; width: 8px; height: 8px; background: #000000; animation: blink 1s steps(1) infinite; }
+    .badge.outline .pulse { background: #FFFFFF; }
     @keyframes blink { 50% { opacity: 0; } }
-
-    .section-title {
-      font-size: 12px;
-      letter-spacing: 2px;
-      text-transform: uppercase;
-      font-weight: 900;
-      border-left: 4px solid #FFFFFF;
-      padding-left: 8px;
-      margin: 20px 0 10px 0;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .modem-hero {
-      border: 2px solid #FFFFFF;
-      background: #080808;
-      padding: 18px;
-      margin-bottom: 16px;
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 16px;
-    }
-
-    .stat-box-label {
-      font-size: 10px;
-      color: #777777;
-      text-transform: uppercase;
-      letter-spacing: 1.5px;
-      font-weight: 700;
-      margin-bottom: 4px;
-    }
-
-    .stat-box-value {
-      font-size: 18px;
-      font-weight: 900;
-      letter-spacing: 0.5px;
-      color: #FFFFFF;
-    }
-
-    .stat-box-sub {
-      font-size: 11px;
-      color: #AAAAAA;
-      margin-top: 3px;
-    }
-
-    .signal-track {
-      height: 8px;
-      background: #222;
-      border: 1px solid #444;
-      margin-top: 6px;
-    }
-    .signal-fill {
-      height: 100%;
-      background: #FFF;
-      width: 0%;
-      transition: width 0.2s ease;
-    }
-
-    .feedback-banner {
-      border: 1px solid #333333;
-      padding: 12px 16px;
-      margin-bottom: 16px;
-      background: #0A0A0A;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 8px;
-      font-size: 12px;
-      letter-spacing: 1px;
-    }
-
-    .feedback-banner.success { border-color: #FFFFFF; background: #121212; }
-    .feedback-banner.error { border-color: #888888; border-style: dashed; background: #1A1A1A; }
-
-    .workspace-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      gap: 16px;
-      margin-bottom: 16px;
-    }
-
-    .panel {
-      border: 1px solid #FFFFFF;
-      background: #050505;
-      padding: 20px;
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-    }
-
-    .panel-header {
-      font-size: 13px;
-      font-weight: 900;
-      letter-spacing: 1.5px;
-      text-transform: uppercase;
-      border-bottom: 1px solid #222222;
-      padding-bottom: 10px;
-      margin-bottom: 16px;
-      display: flex;
-      justify-content: space-between;
-    }
-
-    .form-group {
-      margin-bottom: 14px;
-    }
-
-    .form-group label {
-      display: block;
-      font-size: 10px;
-      color: #888888;
-      text-transform: uppercase;
-      letter-spacing: 1.5px;
-      font-weight: 700;
-      margin-bottom: 6px;
-    }
-
-    input[type=text], input[type=tel], textarea {
-      width: 100%;
-      background: #000000;
-      color: #FFFFFF;
-      border: 1px solid #444444;
-      padding: 12px 14px;
-      font-family: inherit;
-      font-size: 14px;
-      font-weight: 700;
-      outline: none;
-      transition: border-color 0.1s ease;
-    }
-
-    input[type=text]:focus, input[type=tel]:focus, textarea:focus {
-      border-color: #FFFFFF;
-    }
-
-    textarea {
-      resize: vertical;
-      min-height: 90px;
-    }
-
-    .char-count {
-      text-align: right;
-      font-size: 10px;
-      color: #666666;
-      margin-top: 4px;
-      letter-spacing: 1px;
-    }
-
-    .btn-row {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      margin-top: 6px;
-    }
-
-    .btn {
-      flex: 1;
-      min-width: 120px;
-      padding: 12px 16px;
-      font-size: 11px;
-      font-weight: 800;
-      letter-spacing: 1px;
-      text-transform: uppercase;
-      color: #000000;
-      background: #FFFFFF;
-      border: 1px solid #FFFFFF;
-      cursor: pointer;
-      text-align: center;
-    }
-
-    .btn:hover {
-      background: #000000;
-      color: #FFFFFF;
-    }
-
-    .btn.danger {
-      background: #000000;
-      color: #FFFFFF;
-      border-color: #FFFFFF;
-    }
-
-    .btn.danger:hover {
-      background: #FFFFFF;
-      color: #000000;
-    }
-
-    .preset-chips {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-      margin-top: 8px;
-    }
-
-    .chip {
-      font-size: 9px;
-      background: #111111;
-      border: 1px solid #333333;
-      padding: 4px 8px;
-      cursor: pointer;
-      text-transform: uppercase;
-      font-weight: 700;
-    }
-
-    .chip:hover {
-      border-color: #FFFFFF;
-    }
-
-    .console-box {
-      border: 1px solid #333333;
-      background: #050505;
-      padding: 16px;
-      margin-bottom: 16px;
-    }
-
-    .console-screen {
-      background: #000000;
-      border: 1px solid #222222;
-      padding: 12px;
-      height: 160px;
-      overflow-y: auto;
-      font-size: 11px;
-      color: #AAAAAA;
-      font-family: inherit;
-      white-space: pre-wrap;
-      word-break: break-all;
-    }
-
-    .console-input-row {
-      display: flex;
-      gap: 8px;
-      margin-top: 10px;
-    }
-
-    .console-input-row input {
-      flex: 1;
-      padding: 8px 12px;
-      font-size: 12px;
-    }
-
-    .console-input-row button {
-      padding: 8px 14px;
-      font-size: 10px;
-    }
-
-    .table-container {
-      border: 1px solid #333333;
-      background: #080808;
-      overflow-x: auto;
-      margin-bottom: 16px;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 12px;
-      text-align: left;
-    }
-
-    th, td {
-      padding: 10px 14px;
-      border-bottom: 1px solid #222222;
-      border-right: 1px solid #222222;
-    }
-
+    .section-title { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; font-weight: 900; border-left: 4px solid #FFFFFF; padding-left: 8px; margin: 20px 0 10px 0; display: flex; justify-content: space-between; align-items: center; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .card { border: 1px solid #333333; background: #080808; padding: 14px; position: relative; }
+    .card:hover { border-color: #FFFFFF; }
+    .card-label { font-size: 10px; color: #777777; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; margin-bottom: 6px; display: flex; justify-content: space-between; }
+    .card-value { font-size: 24px; font-weight: 800; letter-spacing: 0.5px; color: #FFFFFF; word-break: break-all; }
+    .card-sub { font-size: 11px; color: #888888; margin-top: 4px; font-weight: 500; }
+    .table-container { border: 1px solid #333333; background: #080808; overflow-x: auto; margin-bottom: 16px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
+    th, td { padding: 10px 14px; border-bottom: 1px solid #222222; border-right: 1px solid #222222; }
     th:last-child, td:last-child { border-right: none; }
     tr:last-child td { border-bottom: none; }
-
-    th {
-      background: #111111;
-      color: #888888;
-      font-size: 10px;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      font-weight: 700;
-    }
-
-    td.num {
-      font-weight: 700;
-      color: #FFFFFF;
-      font-size: 13px;
-    }
-
-    footer {
-      border-top: 1px solid #333333;
-      padding: 14px 0;
-      font-size: 10px;
-      color: #666666;
-      display: flex;
-      justify-content: space-between;
-      letter-spacing: 1px;
-      text-transform: uppercase;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-
+    th { background: #111111; color: #999999; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; font-weight: 700; }
+    td.num { font-weight: 700; color: #FFFFFF; font-size: 13px; }
+    .gauge-wrapper { margin-top: 6px; height: 6px; background: #222222; position: relative; }
+    .gauge-fill { height: 100%; background: #FFFFFF; width: 50%; transition: width 0.15s linear; }
+    .btn { display: inline-block; padding: 8px 14px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; color: #000000; background: #FFFFFF; border: 1px solid #FFFFFF; text-decoration: none; cursor: pointer; margin-top: 8px; }
+    .btn:hover { background: #000000; color: #FFFFFF; }
+    .btn.disabled { background: #222222; color: #666666; border-color: #333333; pointer-events: none; }
+    footer { border-top: 1px solid #333333; padding: 14px 0; font-size: 10px; color: #666666; display: flex; justify-content: space-between; align-items: center; letter-spacing: 1px; text-transform: uppercase; flex-wrap: wrap; gap: 8px; }
     footer a { color: #FFFFFF; text-decoration: none; border-bottom: 1px solid #FFFFFF; }
     footer a:hover { background: #FFFFFF; color: #000000; }
+    .alert-box { border: 1px solid #FFFFFF; background: #000000; padding: 10px 14px; font-size: 11px; margin-bottom: 12px; display: none; }
+    .alert-box.active { display: block; }
   </style>
 </head>
 <body>
   <div class="container">
-    
     <header>
       <div class="title-group">
-        <h1>ESP32 // CELLULAR GSM GATEWAY</h1>
-        <p>WEB-TRIGGERED VOICE CALLS &bull; SMS SENDER &bull; HARDWARE SERIAL 2</p>
+        <h1>ESP32 // TELEMETRY MONITOR</h1>
+        <p>HARDWARE SERIAL2 (NEO-6M) &bull; I2C BUS (MPU-6050) &bull; DUAL OTA ACTIVE</p>
       </div>
-      <div class="badges">
-        <span id="conn-badge" class="badge solid"><span class="pulse"></span> ONLINE</span>
-        <span id="call-badge" class="badge outline">LINE: IDLE</span>
-        <a href="/update" class="badge link">&#9889; WEB OTA</a>
+      <div class="sys-badges">
+        <span id="conn-badge" class="badge solid"><span class="pulse"></span> LIVE COMMS</span>
+        <span id="server-badge" class="badge outline">CLOUD: STANDBY</span>
+        <span id="gps-lock-badge" class="badge warn">GPS: CHECKING...</span>
+        <span id="mpu-status-badge" class="badge outline">MPU: DETECTING</span>
+        <a href="/update" class="badge link">&#9889; WEB OTA REFLASH</a>
       </div>
     </header>
 
-    <div id="feedback-box" class="feedback-banner">
-      <span id="feedback-text">SYSTEM STATUS: GATEWAY STANDBY &bull; READY FOR COMMANDS</span>
-      <span id="feedback-time" style="color: #666; font-size: 10px;"></span>
+    <div id="error-banner" class="alert-box">
+      [ALERT] <span id="error-msg">SYSTEM INITIALIZING...</span>
     </div>
 
+    <!-- 1. GPS TELEMETRY & HARDWARE HEALTH MONITOR -->
     <div class="section-title">
-      <span>01 // CELLULAR NETWORK TELEMETRY</span>
-      <span id="carrier-tag" style="color: #888; font-size: 10px;">CARRIER: QUERYING...</span>
+      <span>01 // NEO-6M GPS HARDWARE &amp; SATELLITE TELEMETRY</span>
+      <span id="gps-updated-tag" style="font-size: 10px; color: #888;">WAITING FOR NMEA...</span>
     </div>
 
-    <div class="modem-hero">
-      <div>
-        <div class="stat-box-label">MODEM HARDWARE</div>
-        <div id="modem-state" class="stat-box-value">CHECKING...</div>
-        <div id="modem-sub" class="stat-box-sub">UART2 @ 9600 BAUD</div>
-      </div>
-
-      <div>
-        <div class="stat-box-label">CELLULAR OPERATOR</div>
-        <div id="modem-operator" class="stat-box-value">--</div>
-        <div id="modem-reg-status" class="stat-box-sub">REGISTRATION: PENDING</div>
-      </div>
-
-      <div>
-        <div class="stat-box-label">SIGNAL STRENGTH (CSQ)</div>
-        <div id="modem-signal" class="stat-box-value">-- / 31</div>
-        <div class="signal-track"><div id="signal-fill" class="signal-fill"></div></div>
-        <div id="modem-dbm" class="stat-box-sub">-- dBm &bull; --%</div>
-      </div>
-
-      <div>
-        <div class="stat-box-label">CALL STATUS</div>
-        <div id="active-call-disp" class="stat-box-value">IDLE</div>
-        <div id="last-number-disp" class="stat-box-sub">NO ACTIVE DIAL</div>
-      </div>
-    </div>
-
-    <div class="section-title">
-      <span>02 // DISPATCH WORKSPACE</span>
-      <span>CALL &amp; SMS CONTROLLER</span>
-    </div>
-
-    <div class="workspace-grid">
-      
-      <div class="panel">
+    <!-- GPS HARDWARE & CONSTELLATION HEALTH BANNER -->
+    <div class="card" style="margin-bottom: 14px; border: 1px solid #FFFFFF; background: #050505;">
+      <div class="card-label"><span>GPS HARDWARE &amp; CONSTELLATION DIAGNOSTICS</span><span>DIRECT UART2 TELEMETRY</span></div>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 6px;">
         <div>
-          <div class="panel-header">
-            <span>[ VOICE CALL CONTROLLER ]</span>
-            <span>ATD &bull; ATH</span>
-          </div>
-
-          <div class="form-group">
-            <label for="call-phone">RECIPIENT PHONE NUMBER (WITH COUNTRY CODE):</label>
-            <input type="tel" id="call-phone" placeholder="e.g. +9779812345678 or 9812345678" required>
-          </div>
-
-          <p style="font-size: 11px; color: #888; margin-bottom: 16px;">
-            ESP32 issues standard <code>ATD&lt;number&gt;;</code> voice command to initiate the call through the GSM module.
-          </p>
+          <div style="font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px;">01. HARDWARE STATUS (IS SENSOR ALIVE?):</div>
+          <div id="gps-hw-status" style="font-size: 15px; font-weight: 900; letter-spacing: 1px;">CHECKING HARDWARE COMMS...</div>
         </div>
-
-        <div class="btn-row">
-          <button class="btn" onclick="makeCall()">[ &#128222; MAKE CALL ]</button>
-          <button class="btn danger" onclick="hangupCall()">[ &#9746; HANG UP ]</button>
-        </div>
-      </div>
-
-      <div class="panel">
         <div>
-          <div class="panel-header">
-            <span>[ SMS DISPATCH CONTROLLER ]</span>
-            <span>AT+CMGS</span>
-          </div>
-
-          <div class="form-group">
-            <label for="sms-phone">RECIPIENT PHONE NUMBER:</label>
-            <input type="tel" id="sms-phone" placeholder="e.g. +9779812345678 or 9812345678" required>
-          </div>
-
-          <div class="form-group">
-            <label for="sms-msg">SMS MESSAGE BODY:</label>
-            <textarea id="sms-msg" placeholder="Type your SMS message here..." maxlength="160" oninput="updateCharCount()"></textarea>
-            <div class="char-count"><span id="char-count">0</span> / 160 CHARS</div>
-          </div>
-
-          <div style="font-size: 10px; color: #777; text-transform: uppercase; margin-top: 4px;">QUICK MESSAGE PRESETS:</div>
-          <div class="preset-chips">
-            <span class="chip" onclick="setPreset('ALERT: System triggered an alarm event at node!')">ALARM EVENT</span>
-            <span class="chip" onclick="setPreset('STATUS: ESP32 GSM Gateway is active and healthy.')">PING STATUS</span>
-            <span class="chip" onclick="setPreset('SOS: Urgent assistance requested!')">SOS ALERT</span>
-          </div>
-        </div>
-
-        <div class="btn-row" style="margin-top: 14px;">
-          <button class="btn" onclick="sendSms()">[ &#9993; DISPATCH SMS ]</button>
+          <div style="font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px;">02. SATELLITE SEARCH &amp; LOCK STAGE:</div>
+          <div id="gps-fix-stage" style="font-size: 15px; font-weight: 900; letter-spacing: 1px;">INITIALIZING PARSER...</div>
         </div>
       </div>
-
-    </div>
-
-    <div class="section-title">
-      <span>03 // LIVE AT COMMAND CONSOLE</span>
-      <span>RAW MODEM LOGS</span>
-    </div>
-
-    <div class="console-box">
-      <div id="console-screen" class="console-screen">WAITING FOR MODEM COMMS...</div>
-      <div class="console-input-row">
-        <input type="text" id="custom-at" placeholder="Send custom AT command (e.g. AT+CCLK?, AT+CBC, AT+CSQ)">
-        <button class="btn" onclick="sendCustomAt()">[ EXECUTE AT ]</button>
+      <div id="gps-status-detail" style="margin-top: 12px; padding: 10px 12px; background: #101010; border: 1px solid #333; font-size: 11px; color: #DDDDDD; line-height: 1.45;">
+        MONITORING SERIAL PACKETS ON GPIO16 (RX2)...
       </div>
     </div>
 
-    <div class="section-title">
-      <span>04 // SYSTEM DIAGNOSTICS</span>
-      <span>ESP32 HARDWARE</span>
+    <div class="grid">
+      <div class="card">
+        <div class="card-label"><span>COORDINATES (WGS84)</span><span>LAT / LON</span></div>
+        <div class="card-value" id="gps-coords">--.------, --.------</div>
+        <div class="card-sub" id="gps-coords-detail">NO ACTIVE POSITION FIX</div>
+        <a id="maps-link" href="#" target="_blank" class="btn disabled">OPEN ON GOOGLE MAPS</a>
+      </div>
+
+      <div class="card">
+        <div class="card-label"><span>GROUND SPEED</span><span>VELOCITY</span></div>
+        <div class="card-value"><span id="gps-speed-kmh">--.-</span> <span style="font-size: 13px;">KM/H</span></div>
+        <div class="card-sub"><span id="gps-speed-mph">--.-</span> MPH &bull; COURSE: <span id="gps-course">--&deg;</span> (<span id="gps-cardinal">--</span>)</div>
+      </div>
+
+      <div class="card">
+        <div class="card-label"><span>ALTITUDE / ACCURACY</span><span>HDOP</span></div>
+        <div class="card-value"><span id="gps-alt-m">--.-</span> <span style="font-size: 13px;">M</span></div>
+        <div class="card-sub"><span id="gps-alt-ft">--.-</span> FT &bull; HDOP: <span id="gps-hdop">--.-</span> (LOWER IS BETTER)</div>
+      </div>
+
+      <div class="card">
+        <div class="card-label"><span>CONSTELLATION STATS</span><span>TRACKING</span></div>
+        <div class="card-value"><span id="gps-sats">0</span> <span style="font-size: 13px;">SATELLITES</span></div>
+        <div class="card-sub">FIX AGE: <span id="gps-age">--</span> MS &bull; RX BYTES: <span id="gps-chars">0</span></div>
+      </div>
     </div>
 
+    <!-- GPS TIME & NMEA DIAGNOSTICS TABLE -->
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>UTC DATE</th>
+            <th>UTC TIME (ZULU)</th>
+            <th>CHARS PROCESSED</th>
+            <th>CHECKSUM FAILURES</th>
+            <th>RAW SENTENCES WITH FIX</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td id="gps-date" class="num">----/--/--</td>
+            <td id="gps-time" class="num">--:--:--</td>
+            <td id="gps-chars-diag" class="num">0</td>
+            <td id="gps-cs-fail" class="num">0</td>
+            <td id="gps-fix-stat" class="num">NO FIX YET</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 2. MPU-6050 IMU TELEMETRY -->
+    <div class="section-title">
+      <span>02 // MPU-6050 6-AXIS INERTIAL SENSOR</span>
+      <span id="mpu-updated-tag" style="font-size: 10px; color: #888;">I2C 0x68</span>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-label"><span>ACCELEROMETER (TOTAL)</span><span>G-FORCE</span></div>
+        <div class="card-value"><span id="mpu-accel-total">--.-</span> <span style="font-size: 13px;">G</span></div>
+        <div class="card-sub">NORMAL GRAVITY BASELINE ~1.00 G</div>
+      </div>
+
+      <div class="card">
+        <div class="card-label"><span>ATTITUDE (PITCH / ROLL)</span><span>INCLINATION</span></div>
+        <div class="card-value"><span id="mpu-pitch">--.-</span>&deg; / <span id="mpu-roll">--.-</span>&deg;</div>
+        <div class="card-sub">COMPUTED FROM REAL-TIME ACCELEROMETER VECTORS</div>
+        <div class="gauge-wrapper"><div id="pitch-gauge" class="gauge-fill"></div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-label"><span>IMU DIE TEMPERATURE</span><span>ON-CHIP</span></div>
+        <div class="card-value"><span id="mpu-temp-c">--.-</span> <span style="font-size: 13px;">&deg;C</span></div>
+        <div class="card-sub"><span id="mpu-temp-f">--.-</span> &deg;F (INTERNAL SENSOR TEMP)</div>
+      </div>
+    </div>
+
+    <!-- DETAILED 6-DOF AXIS BREAKDOWN TABLE -->
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>AXIS</th>
+            <th>ACCELERATION (m/s&sup2;)</th>
+            <th>ACCELERATION (G)</th>
+            <th>ANGULAR VELOCITY (&deg;/s)</th>
+            <th>ANGULAR VELOCITY (rad/s)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th style="color:#FFF;">X-AXIS</th>
+            <td id="mpu-ax-ms" class="num">--.---</td>
+            <td id="mpu-ax-g" class="num">--.---</td>
+            <td id="mpu-gx-deg" class="num">--.---</td>
+            <td id="mpu-gx-rad" class="num">--.---</td>
+          </tr>
+          <tr>
+            <th style="color:#FFF;">Y-AXIS</th>
+            <td id="mpu-ay-ms" class="num">--.---</td>
+            <td id="mpu-ay-g" class="num">--.---</td>
+            <td id="mpu-gy-deg" class="num">--.---</td>
+            <td id="mpu-gy-rad" class="num">--.---</td>
+          </tr>
+          <tr>
+            <th style="color:#FFF;">Z-AXIS</th>
+            <td id="mpu-az-ms" class="num">--.---</td>
+            <td id="mpu-az-g" class="num">--.---</td>
+            <td id="mpu-gz-deg" class="num">--.---</td>
+            <td id="mpu-gz-rad" class="num">--.---</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 3. HYDRA CLOUD SERVER INGEST (a.md / Production API) -->
+    <div class="section-title">
+      <span>03 // HYDRA CLOUD SERVER INGEST (PRODUCTION TELEMETRY)</span>
+      <span id="server-updated-tag" style="font-size: 10px; color: #888;">STANDBY</span>
+    </div>
+
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>TARGET API ENDPOINT</th>
+            <th>UPLINK STATUS</th>
+            <th>LATENCY</th>
+            <th>SUCCESS</th>
+            <th>FAIL</th>
+            <th>LAST SERVER RESPONSE</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td id="srv-url" style="color:#FFF; word-break:break-all;">https://zenithkandel.com.np/hydra/backend/api/telemetry/landslide.php</td>
+            <td id="srv-status" class="num">CONNECTING...</td>
+            <td id="srv-latency" class="num">-- ms</td>
+            <td id="srv-ok" class="num">0</td>
+            <td id="srv-fail" class="num">0</td>
+            <td id="srv-resp" style="font-size:11px; color:#AAA; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">WAITING FOR FIRST UPLINK</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 4. SYSTEM & OTA DIAGNOSTICS -->
     <div class="table-container">
       <table>
         <thead>
@@ -852,8 +351,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
             <th>IP ADDRESS</th>
             <th>WI-FI RSSI</th>
             <th>SYSTEM UPTIME</th>
-            <th>FREE MEMORY</th>
-            <th>UART PINOUT</th>
+            <th>FREE HEAP</th>
+            <th>OTA SERVICE</th>
           </tr>
         </thead>
         <tbody>
@@ -862,15 +361,15 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
             <td id="sys-rssi" class="num">-- dBm</td>
             <td id="sys-uptime" class="num">00:00:00</td>
             <td id="sys-heap" class="num">-- KB</td>
-            <td class="num">RX: GPIO 16 &bull; TX: GPIO 17 &bull; 9600 BAUD</td>
+            <td class="num"><a href="/update" style="color:#FFF; text-decoration: underline;">READY AT /update</a></td>
           </tr>
         </tbody>
       </table>
     </div>
 
     <footer>
-      <span>ESP32 CELLULAR GSM GATEWAY &bull; WEB DISPATCHER</span>
-      <span><a href="/update">[ OVER-THE-AIR FIRMWARE UPDATE ]</a></span>
+      <span>ESP32 MONOCHROME REAL TELEMETRY NODE &bull; DUAL OTA (WEB &amp; ARDUINOOTA)</span>
+      <span><a href="/update">[ FLASH FIRMWARE / OTA ]</a></span>
     </footer>
 
   </div>
@@ -878,244 +377,211 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
   <script>
     let failedFetches = 0;
 
-    async function pollStatus() {
+    async function pollTelemetry() {
       try {
-        const res = await fetch('/api/status');
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
+        const response = await fetch('/api/data');
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const data = await response.json();
         failedFetches = 0;
 
         document.getElementById('conn-badge').className = "badge solid";
-        document.getElementById('conn-badge').innerHTML = '<span class="pulse"></span> ONLINE';
-
-        if (data.gsm.alive) {
-          document.getElementById('modem-state').innerText = "ONLINE (ALIVE)";
-          document.getElementById('modem-sub').innerText = "UART RESPONDING // " + data.gsm.operator;
-        } else {
-          document.getElementById('modem-state').innerText = "OFFLINE";
-          document.getElementById('modem-sub').innerText = "NO AT RESPONSE FROM MODEM";
-        }
-
-        document.getElementById('modem-operator').innerText = data.gsm.operator;
-        document.getElementById('carrier-tag').innerText = "CARRIER: " + data.gsm.operator;
-        document.getElementById('modem-reg-status').innerText = data.gsm.status_text;
-
-        if (data.gsm.rssi <= 31) {
-          document.getElementById('modem-signal').innerText = data.gsm.rssi + " / 31";
-          document.getElementById('signal-fill').style.width = data.gsm.signal_percent + "%";
-          document.getElementById('modem-dbm').innerText = data.gsm.signal_dbm + " dBm • " + data.gsm.signal_percent + "%";
-        } else {
-          document.getElementById('modem-signal').innerText = "NO SIGNAL";
-          document.getElementById('signal-fill').style.width = "0%";
-          document.getElementById('modem-dbm').innerText = "UNKNOWN / NO TOWER";
-        }
-
-        document.getElementById('active-call-disp').innerHTML = data.call.state;
-        document.getElementById('call-badge').innerHTML = "LINE: " + (data.call.state.includes("CALL") ? "BUSY" : "IDLE");
-        if (data.call.last_number) {
-          document.getElementById('last-number-disp').innerText = "LAST: " + data.call.last_number;
-        }
-
-        const fBox = document.getElementById('feedback-box');
-        fBox.className = data.action.success ? "feedback-banner success" : "feedback-banner error";
-        document.getElementById('feedback-text').innerText = data.action.text;
-
-        if (data.logs && data.logs.length > 0) {
-          document.getElementById('console-screen').innerText = data.logs.join("\n");
-          const cBox = document.getElementById('console-screen');
-          cBox.scrollTop = cBox.scrollHeight;
-        }
+        document.getElementById('conn-badge').innerHTML = '<span class="pulse"></span> LIVE COMMS';
+        document.getElementById('error-banner').className = "alert-box";
 
         document.getElementById('sys-ip').innerText = data.sys.ip;
-        document.getElementById('sys-rssi').innerText = data.sys.rssi + " dBm";
+        document.getElementById('sys-rssi').innerText = data.sys.rssi + ' dBm';
         document.getElementById('sys-uptime').innerText = formatUptime(data.sys.uptime_sec);
-        document.getElementById('sys-heap').innerText = Math.round(data.sys.free_heap / 1024) + " KB";
+        document.getElementById('sys-heap').innerText = Math.round(data.sys.free_heap / 1024) + ' KB';
 
-      } catch (e) {
+        // 1. GPS TELEMETRY & HARDWARE HEALTH MONITOR
+        const gpsBadge = document.getElementById('gps-lock-badge');
+        const mapsLink = document.getElementById('maps-link');
+
+        document.getElementById('gps-chars').innerText = data.gps.chars_rx;
+        document.getElementById('gps-chars-diag').innerText = data.gps.chars_rx;
+        document.getElementById('gps-cs-fail').innerText = data.gps.checksum_fail;
+        document.getElementById('gps-sats').innerText = data.gps.satellites;
+
+        // GPS ALIVE & SEARCH STATUS BANNER
+        const hwStatusEl = document.getElementById('gps-hw-status');
+        const fixStageEl = document.getElementById('gps-fix-stage');
+        const statusDetailEl = document.getElementById('gps-status-detail');
+
+        if (data.gps.hw_alive) {
+          const rxAgo = data.gps.last_rx_ms < 1000 ? '< 1s ago' : (Math.round(data.gps.last_rx_ms / 100) / 10 + 's ago');
+          hwStatusEl.innerHTML = '<span style="color:#FFF;">[ &#9679; ALIVE &amp; STREAMING ]</span> <span style="font-size:11px;color:#888;">(UART RX ' + rxAgo + ')</span>';
+        } else {
+          hwStatusEl.innerHTML = '<span style="color:#FFF;border:1px dashed #FFF;padding:1px 6px;">[ &#10005; HARDWARE DEAD / NO RX ]</span>';
+        }
+
+        fixStageEl.innerText = data.gps.fix_stage;
+        statusDetailEl.innerText = data.gps.status_detail;
+
+        if (data.gps.hw_alive === false) {
+          gpsBadge.className = "badge warn";
+          gpsBadge.innerText = "GPS: HARDWARE OFFLINE";
+          document.getElementById('gps-coords').innerText = "NO HARDWARE RX";
+          document.getElementById('gps-coords-detail').innerText = "VERIFY PIN 16 (RX2) -> GPS TX WIRING";
+          mapsLink.className = "btn disabled";
+          mapsLink.href = "#";
+          document.getElementById('gps-updated-tag').innerText = "NO HARDWARE DATA";
+        } else if (data.gps.fix === true) {
+          gpsBadge.className = "badge solid";
+          gpsBadge.innerText = "GPS: 3D FIX LOCKED (" + data.gps.satellites + " SATS)";
+          
+          const latStr = data.gps.lat.toFixed(6);
+          const lngStr = data.gps.lng.toFixed(6);
+          document.getElementById('gps-coords').innerText = latStr + ", " + lngStr;
+          document.getElementById('gps-coords-detail').innerText = "PRECISION FIX &bull; LAT " + latStr + "&deg; | LNG " + lngStr + "&deg;";
+          
+          mapsLink.className = "btn";
+          mapsLink.href = "https://www.google.com/maps?q=" + latStr + "," + lngStr;
+
+          document.getElementById('gps-speed-kmh').innerText = data.gps.speed_kmh.toFixed(1);
+          document.getElementById('gps-speed-mph').innerText = data.gps.speed_mph.toFixed(1);
+          document.getElementById('gps-course').innerText = data.gps.course_deg.toFixed(1) + "°";
+          document.getElementById('gps-cardinal').innerText = data.gps.cardinal || "--";
+          document.getElementById('gps-alt-m').innerText = data.gps.alt_m.toFixed(1);
+          document.getElementById('gps-alt-ft').innerText = data.gps.alt_ft.toFixed(1);
+          document.getElementById('gps-hdop').innerText = data.gps.hdop.toFixed(2);
+          document.getElementById('gps-date').innerText = data.gps.date;
+          document.getElementById('gps-time').innerText = data.gps.time;
+          document.getElementById('gps-fix-stat').innerText = "3D LOCK ACTIVE";
+          document.getElementById('gps-age').innerText = data.gps.fix_age_ms;
+          document.getElementById('gps-updated-tag').innerText = "NMEA VALID";
+        } else {
+          // GPS is transmitting NMEA sentences but searching for satellite constellation lock
+          gpsBadge.className = "badge warn";
+          if (data.gps.satellites > 0) {
+            gpsBadge.innerText = "GPS: ACQUIRING (" + data.gps.satellites + "/4 SATS)";
+          } else {
+            gpsBadge.innerText = "GPS: SEARCHING SATELLITES";
+          }
+          document.getElementById('gps-coords').innerText = "--.------, --.------";
+          document.getElementById('gps-coords-detail').innerText = data.gps.satellites > 0 ? ("TRACKING " + data.gps.satellites + " SATELLITE(S) - WAITING FOR 3D FIX...") : "SEARCHING FOR SATELLITES (MOVE ANTENNA NEAR WINDOW/OUTDOORS)";
+          
+          mapsLink.className = "btn disabled";
+          mapsLink.href = "#";
+
+          document.getElementById('gps-speed-kmh').innerText = "--.-";
+          document.getElementById('gps-speed-mph').innerText = "--.-";
+          document.getElementById('gps-course').innerText = "--°";
+          document.getElementById('gps-cardinal').innerText = "--";
+          document.getElementById('gps-alt-m').innerText = "--.-";
+          document.getElementById('gps-alt-ft').innerText = "--.-";
+          document.getElementById('gps-hdop').innerText = data.gps.hdop > 0 ? data.gps.hdop.toFixed(2) : "--.-";
+          document.getElementById('gps-date').innerText = data.gps.date || "----/--/--";
+          document.getElementById('gps-time').innerText = data.gps.time || "--:--:--";
+          document.getElementById('gps-fix-stat').innerText = data.gps.satellites > 0 ? ("TRACKING " + data.gps.satellites + " SATS (NO LOCK)") : "SEARCHING (0 FIX)";
+          document.getElementById('gps-age').innerText = data.gps.fix_age_ms > 0 ? data.gps.fix_age_ms : "--";
+          document.getElementById('gps-updated-tag').innerText = data.gps.satellites > 0 ? "ACQUIRING FIX" : "WAITING FOR SATELLITES";
+        }
+
+        // 2. MPU-6050 DATA (NO FAKE DATA)
+        const mpuBadge = document.getElementById('mpu-status-badge');
+        if (data.mpu.connected === true) {
+          mpuBadge.className = "badge solid";
+          mpuBadge.innerText = "MPU6050: ONLINE";
+          document.getElementById('mpu-updated-tag').innerText = "I2C OK (0x68)";
+
+          document.getElementById('mpu-accel-total').innerText = data.mpu.total_accel_g.toFixed(2);
+          document.getElementById('mpu-pitch').innerText = (data.mpu.pitch >= 0 ? "+" : "") + data.mpu.pitch.toFixed(1);
+          document.getElementById('mpu-roll').innerText = (data.mpu.roll >= 0 ? "+" : "") + data.mpu.roll.toFixed(1);
+          
+          const clampedPitch = Math.max(-90, Math.min(90, data.mpu.pitch));
+          const gaugePct = ((clampedPitch + 90) / 180) * 100;
+          document.getElementById('pitch-gauge').style.width = gaugePct + "%";
+
+          document.getElementById('mpu-temp-c').innerText = data.mpu.temp_c.toFixed(1);
+          document.getElementById('mpu-temp-f').innerText = data.mpu.temp_f.toFixed(1);
+
+          document.getElementById('mpu-ax-ms').innerText = (data.mpu.ax >= 0 ? "+" : "") + data.mpu.ax.toFixed(3);
+          document.getElementById('mpu-ay-ms').innerText = (data.mpu.ay >= 0 ? "+" : "") + data.mpu.ay.toFixed(3);
+          document.getElementById('mpu-az-ms').innerText = (data.mpu.az >= 0 ? "+" : "") + data.mpu.az.toFixed(3);
+
+          document.getElementById('mpu-ax-g').innerText = (data.mpu.ax_g >= 0 ? "+" : "") + data.mpu.ax_g.toFixed(3);
+          document.getElementById('mpu-ay-g').innerText = (data.mpu.ay_g >= 0 ? "+" : "") + data.mpu.ay_g.toFixed(3);
+          document.getElementById('mpu-az-g').innerText = (data.mpu.az_g >= 0 ? "+" : "") + data.mpu.az_g.toFixed(3);
+
+          document.getElementById('mpu-gx-deg').innerText = (data.mpu.gx >= 0 ? "+" : "") + data.mpu.gx.toFixed(2);
+          document.getElementById('mpu-gy-deg').innerText = (data.mpu.gy >= 0 ? "+" : "") + data.mpu.gy.toFixed(2);
+          document.getElementById('mpu-gz-deg').innerText = (data.mpu.gz >= 0 ? "+" : "") + data.mpu.gz.toFixed(2);
+
+          document.getElementById('mpu-gx-rad').innerText = (data.mpu.gx_rad >= 0 ? "+" : "") + data.mpu.gx_rad.toFixed(3);
+          document.getElementById('mpu-gy-rad').innerText = (data.mpu.gy_rad >= 0 ? "+" : "") + data.mpu.gy_rad.toFixed(3);
+          document.getElementById('mpu-gz-rad').innerText = (data.mpu.gz_rad >= 0 ? "+" : "") + data.mpu.gz_rad.toFixed(3);
+        } else {
+          mpuBadge.className = "badge warn";
+          mpuBadge.innerText = "MPU6050: DISCONNECTED";
+          document.getElementById('mpu-updated-tag').innerText = "I2C ERROR";
+
+          document.getElementById('mpu-accel-total').innerText = "--";
+          document.getElementById('mpu-pitch').innerText = "--";
+          document.getElementById('mpu-roll').innerText = "--";
+          document.getElementById('mpu-temp-c').innerText = "--";
+          document.getElementById('mpu-temp-f').innerText = "--";
+
+          document.getElementById('mpu-ax-ms').innerText = "SENSOR DISCONNECTED";
+          document.getElementById('mpu-ay-ms').innerText = "CHECK SDA (21)";
+          document.getElementById('mpu-az-ms').innerText = "CHECK SCL (22)";
+        }
+
+        // 3. SERVER INGEST STATUS
+        const serverBadge = document.getElementById('server-badge');
+        if (data.server) {
+          document.getElementById('srv-url').innerText = data.server.url;
+          document.getElementById('srv-latency').innerText = data.server.last_latency_ms + ' ms';
+          document.getElementById('srv-ok').innerText = data.server.success_count;
+          document.getElementById('srv-fail').innerText = data.server.fail_count;
+          document.getElementById('srv-resp').innerText = data.server.last_response || '--';
+
+          if (data.server.last_code >= 200 && data.server.last_code < 300) {
+            serverBadge.className = "badge solid";
+            serverBadge.innerHTML = '<span class="pulse"></span> CLOUD: 200 OK';
+            document.getElementById('srv-status').innerHTML = '<span style="color:#FFF;">HTTP ' + data.server.last_code + ' OK</span>';
+            const agoSec = Math.round(data.server.last_send_ago_ms / 100) / 10;
+            document.getElementById('server-updated-tag').innerText = 'SYNCED ' + agoSec + 'S AGO';
+          } else if (data.server.last_code > 0) {
+            serverBadge.className = "badge warn";
+            serverBadge.innerText = 'CLOUD: HTTP ' + data.server.last_code;
+            document.getElementById('srv-status').innerText = 'HTTP ' + data.server.last_code;
+            document.getElementById('server-updated-tag').innerText = 'HTTP WARNING';
+          } else {
+            serverBadge.className = "badge outline";
+            serverBadge.innerText = 'CLOUD: STANDBY';
+            document.getElementById('srv-status').innerText = 'INITIALIZING...';
+            document.getElementById('server-updated-tag').innerText = 'STANDBY';
+          }
+        }
+
+      } catch (err) {
         failedFetches++;
-        if (failedFetches > 3) {
+        if (failedFetches > 2) {
           document.getElementById('conn-badge').className = "badge warn";
-          document.getElementById('conn-badge').innerText = "DISCONNECTED";
+          document.getElementById('conn-badge').innerText = "OFFLINE [RETRYING...]";
+          document.getElementById('error-banner').className = "alert-box active";
+          document.getElementById('error-msg').innerText = "UNABLE TO REACH ESP32 TELEMETRY ENDPOINT (/api/data): " + err.message;
         }
       }
     }
 
-    async function makeCall() {
-      const num = document.getElementById('call-phone').value.trim();
-      if (!num) {
-        alert("Please enter a destination phone number.");
-        return;
-      }
-      document.getElementById('feedback-text').innerText = "DIALING " + num + "... PLEASE WAIT";
-      try {
-        const res = await fetch('/api/call?num=' + encodeURIComponent(num));
-        const data = await res.json();
-        pollStatus();
-      } catch (e) {
-        alert("Error calling: " + e.message);
-      }
+    function formatUptime(totalSeconds) {
+      const hrs = Math.floor(totalSeconds / 3600).toString().padStart(2, '0');
+      const mins = Math.floor((totalSeconds % 3600) / 60).toString().padStart(2, '0');
+      const secs = Math.floor(totalSeconds % 60).toString().padStart(2, '0');
+      return hrs + ":" + mins + ":" + secs;
     }
 
-    async function hangupCall() {
-      document.getElementById('feedback-text').innerText = "HANGING UP CALL (ATH)...";
-      try {
-        const res = await fetch('/api/hangup');
-        const data = await res.json();
-        pollStatus();
-      } catch (e) {
-        alert("Error hanging up: " + e.message);
-      }
-    }
-
-    async function sendSms() {
-      const num = document.getElementById('sms-phone').value.trim();
-      const msg = document.getElementById('sms-msg').value.trim();
-      if (!num) {
-        alert("Please enter a recipient phone number.");
-        return;
-      }
-      if (!msg) {
-        alert("Please enter a message to send.");
-        return;
-      }
-      document.getElementById('feedback-text').innerText = "DISPATCHING SMS TO " + num + "... AWAITING NETWORK CONFIRMATION (UP TO 15s)";
-      try {
-        const res = await fetch('/api/send-sms?num=' + encodeURIComponent(num) + '&msg=' + encodeURIComponent(msg));
-        const data = await res.json();
-        pollStatus();
-      } catch (e) {
-        alert("Error sending SMS: " + e.message);
-      }
-    }
-
-    async function sendCustomAt() {
-      const cmd = document.getElementById('custom-at').value.trim();
-      if (!cmd) return;
-      try {
-        await fetch('/api/at?cmd=' + encodeURIComponent(cmd));
-        document.getElementById('custom-at').value = "";
-        pollStatus();
-      } catch (e) {
-        alert("Error executing AT: " + e.message);
-      }
-    }
-
-    function setPreset(text) {
-      document.getElementById('sms-msg').value = text;
-      updateCharCount();
-    }
-
-    function updateCharCount() {
-      const len = document.getElementById('sms-msg').value.length;
-      document.getElementById('char-count').innerText = len;
-    }
-
-    function formatUptime(totalSecs) {
-      const h = Math.floor(totalSecs / 3600).toString().padStart(2, '0');
-      const m = Math.floor((totalSecs % 3600) / 60).toString().padStart(2, '0');
-      const s = Math.floor(totalSecs % 60).toString().padStart(2, '0');
-      return h + ":" + m + ":" + s;
-    }
-
-    pollStatus();
-    setInterval(pollStatus, 1500);
+    pollTelemetry();
+    setInterval(pollTelemetry, 1000);
   </script>
 </body>
 </html>
 )rawliteral";
 
 /* ====================================================================
- * 7. WEB SERVER HANDLERS & OTA
+ * 5. EMBEDDED SHARP MONOCHROME WEB OTA HTML
  * ==================================================================== */
-
-void handleRoot() {
-  server.send_P(200, "text/html", INDEX_HTML);
-}
-
-void handleStatus() {
-  String json = "{";
-
-  json += "\"sys\":{";
-  json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
-  json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-  json += "\"uptime_sec\":" + String(millis() / 1000) + ",";
-  json += "\"free_heap\":" + String(ESP.getFreeHeap());
-  json += "},";
-
-  json += "\"gsm\":{";
-  json += "\"alive\":" + String(isGsmAlive ? "true" : "false") + ",";
-  json += "\"rssi\":" + String(gsmRssi) + ",";
-  json += "\"signal_percent\":" + String(gsmSignalPercent) + ",";
-  json += "\"signal_dbm\":" + String(gsmSignalDbm) + ",";
-  json += "\"network_reg\":" + String(gsmNetworkReg) + ",";
-  json += "\"operator\":\"" + gsmOperator + "\",";
-  json += "\"status_text\":\"" + gsmStatusText + "\"";
-  json += "},";
-
-  json += "\"call\":{";
-  json += "\"state\":\"" + activeCallState + "\",";
-  json += "\"last_number\":\"" + lastCalledNumber + "\"";
-  json += "},";
-
-  json += "\"action\":{";
-  json += "\"text\":\"" + lastActionResult + "\",";
-  json += "\"success\":" + String(lastActionSuccess ? "true" : "false");
-  json += "},";
-
-  json += "\"logs\":[";
-  for (int i = 0; i < MAX_LOG_LINES; i++) {
-    int idx = (logIndex + i) % MAX_LOG_LINES;
-    if (logLines[idx].length() > 0) {
-      String escaped = logLines[idx];
-      escaped.replace("\"", "\\\"");
-      json += "\"" + escaped + "\"";
-      if (i < MAX_LOG_LINES - 1) json += ",";
-    }
-  }
-  if (json.endsWith(",")) json.remove(json.length() - 1);
-  json += "]";
-
-  json += "}";
-
-  server.send(200, "application/json", json);
-}
-
-void handleCall() {
-  if (server.hasArg("num")) {
-    String num = server.arg("num");
-    bool ok = gsmMakeCall(num);
-    server.send(200, "application/json", "{\"success\":" + String(ok ? "true" : "false") + "}");
-  } else {
-    server.send(400, "application/json", "{\"success\":false,\"error\":\"Missing number\"}");
-  }
-}
-
-void handleHangup() {
-  bool ok = gsmHangupCall();
-  server.send(200, "application/json", "{\"success\":" + String(ok ? "true" : "false") + "}");
-}
-
-void handleSendSms() {
-  if (server.hasArg("num") && server.hasArg("msg")) {
-    String num = server.arg("num");
-    String msg = server.arg("msg");
-    bool ok = gsmSendSMS(num, msg);
-    server.send(200, "application/json", "{\"success\":" + String(ok ? "true" : "false") + "}");
-  } else {
-    server.send(400, "application/json", "{\"success\":false,\"error\":\"Missing number or message\"}");
-  }
-}
-
-void handleCustomAt() {
-  if (server.hasArg("cmd")) {
-    String cmd = server.arg("cmd");
-    String resp = sendATCommand(cmd, 2500);
-    server.send(200, "text/plain", resp);
-  } else {
-    server.send(400, "text/plain", "Missing cmd parameter");
-  }
-}
-
 const char OTA_INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1142,9 +608,10 @@ const char OTA_INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 </head>
 <body>
   <div class="box">
-    <span class="badge">[ ESP32 FIRMWARE RECOVERY ]</span>
+    <span class="badge">[ ESP32 OVER-THE-AIR FIRMWARE UPDATE ]</span>
     <h1>FIRMWARE FLASH PORTAL</h1>
     <p>SELECT COMPILED .BIN FIRMWARE BINARY TO REFLASH OVER WI-FI</p>
+    
     <form id="upload_form" enctype="multipart/form-data" method="POST" action="/update">
       <input type="file" name="update" id="file" accept=".bin" required onchange="fileSelected()">
       <div class="bar-wrap" id="bar_wrap"><div class="bar-fill" id="bar_fill"></div></div>
@@ -1153,22 +620,28 @@ const char OTA_INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       <div id="status">STATUS: STANDBY // WAITING FOR BINARY FILE</div>
     </form>
   </div>
+
   <script>
     function fileSelected() {
       const f = document.getElementById('file').files[0];
       if (f) document.getElementById('status').innerText = 'SELECTED: ' + f.name + ' (' + Math.round(f.size / 1024) + ' KB)';
     }
+
     document.getElementById('upload_form').onsubmit = function(e) {
       e.preventDefault();
       const f = document.getElementById('file').files[0];
       if (!f) return;
+
       const data = new FormData();
       data.append('update', f);
+
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/update', true);
+
       document.getElementById('bar_wrap').style.display = 'block';
       document.getElementById('btn_submit').style.display = 'none';
       document.getElementById('status').innerText = 'FLASHING FIRMWARE TO SPI FLASH... DO NOT POWER OFF';
+
       xhr.upload.onprogress = function(e) {
         if (e.lengthComputable) {
           const pct = Math.round((e.loaded / e.total) * 100);
@@ -1176,6 +649,7 @@ const char OTA_INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
           document.getElementById('status').innerText = 'UPLOADING: ' + pct + '%';
         }
       };
+
       xhr.onload = function() {
         if (xhr.status === 200) {
           document.getElementById('bar_fill').style.width = '100%';
@@ -1186,16 +660,368 @@ const char OTA_INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
           document.getElementById('btn_submit').style.display = 'block';
         }
       };
+
       xhr.onerror = function() {
         document.getElementById('status').innerText = 'NETWORK / COMMS ERROR DURING FLASH';
         document.getElementById('btn_submit').style.display = 'block';
       };
+
       xhr.send(data);
     };
   </script>
 </body>
 </html>
 )rawliteral";
+
+/* ====================================================================
+ * 6. HARDWARE SENSOR DRIVERS
+ * ==================================================================== */
+
+void initMPU6050() {
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  delay(100);
+
+  if (!mpu.begin(0x68, &Wire)) {
+    Serial.println("[MPU6050] Address 0x68 not found. Checking 0x69...");
+    if (!mpu.begin(0x69, &Wire)) {
+      Serial.println("[MPU6050] Sensor not found on I2C bus! Check SDA/SCL wiring.");
+      mpuConnected = false;
+      return;
+    }
+  }
+
+  mpuConnected = true;
+  Serial.println("[MPU6050] Sensor online and initialized.");
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+}
+
+void readMPU6050() {
+  if (!mpuConnected) {
+    if (millis() % 5000 < 100) {
+      initMPU6050();
+    }
+    return;
+  }
+
+  sensors_event_t a, g, temp;
+  if (!mpu.getEvent(&a, &g, &temp)) {
+    mpuConnected = false;
+    return;
+  }
+
+  mpuData.ax = a.acceleration.x;
+  mpuData.ay = a.acceleration.y;
+  mpuData.az = a.acceleration.z;
+
+  mpuData.ax_g = mpuData.ax / 9.80665;
+  mpuData.ay_g = mpuData.ay / 9.80665;
+  mpuData.az_g = mpuData.az / 9.80665;
+  mpuData.total_accel_g = sqrt((mpuData.ax_g * mpuData.ax_g) + 
+                               (mpuData.ay_g * mpuData.ay_g) + 
+                               (mpuData.az_g * mpuData.az_g));
+
+  mpuData.gx_rad = g.gyro.x;
+  mpuData.gy_rad = g.gyro.y;
+  mpuData.gz_rad = g.gyro.z;
+  mpuData.gx = g.gyro.x * 57.2957795;
+  mpuData.gy = g.gyro.y * 57.2957795;
+  mpuData.gz = g.gyro.z * 57.2957795;
+
+  mpuData.temp_c = temp.temperature;
+  mpuData.temp_f = (temp.temperature * 1.8) + 32.0;
+
+  mpuData.pitch = atan2(-mpuData.ax, sqrt(mpuData.ay * mpuData.ay + mpuData.az * mpuData.az)) * 57.2957795;
+  mpuData.roll  = atan2(mpuData.ay, mpuData.az) * 57.2957795;
+}
+
+/* ====================================================================
+ * 6.5. HYDRA SERVER TELEMETRY INGEST DISPATCH (HTTP/HTTPS POST)
+ * ==================================================================== */
+
+void sendTelemetryToServer() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  // Drain GPS serial buffer before network request to prevent buffer overflow
+  while (gpsSerial.available() > 0) {
+    char c = gpsSerial.read();
+    gps.encode(c);
+    lastGpsByteMillis = millis();
+  }
+
+  // Hardware status evaluation
+  bool gpsHwAlive = (lastGpsByteMillis > 0 && (millis() - lastGpsByteMillis < 2500));
+  bool hasFix = gps.location.isValid() && (gps.location.age() < 5000);
+  int sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
+
+  String hwStatus;
+  if (!gpsHwAlive) {
+    hwStatus = (gps.charsProcessed() == 0) ? "DEAD / NO DATA RECEIVED" : "COMM TIMEOUT / STALLED";
+  } else {
+    hwStatus = "ALIVE & STREAMING";
+  }
+
+  String fixStage;
+  if (!gpsHwAlive) {
+    fixStage = "OFFLINE";
+  } else if (hasFix) {
+    fixStage = "3D FIX LOCKED (" + String(sats) + " SATS)";
+  } else if (sats == 0) {
+    fixStage = "SEARCHING SATELLITES";
+  } else if (sats < 4) {
+    fixStage = "ACQUIRING FIX";
+  } else {
+    fixStage = "3D FIX LOCKED";
+  }
+
+  // Build JSON Request Body matching a.md Section 2.C exactly
+  String payload = "{";
+  payload += "\"node_uid\":\"" + String(NODE_UID) + "\",";
+  payload += "\"rssi\":" + String(WiFi.RSSI()) + ",";
+
+  // GPS Telemetry Object
+  payload += "\"gps\":{";
+  payload += "\"connected\":" + String(gps.charsProcessed() > 0 ? "true" : "false") + ",";
+  payload += "\"hw_alive\":" + String(gpsHwAlive ? "true" : "false") + ",";
+  payload += "\"hw_status\":\"" + hwStatus + "\",";
+  payload += "\"fix\":" + String(hasFix ? "true" : "false") + ",";
+  payload += "\"fix_stage\":\"" + fixStage + "\",";
+  payload += "\"satellites\":" + String(sats) + ",";
+  payload += "\"lat\":" + String(hasFix ? gps.location.lat() : 0.0, 6) + ",";
+  payload += "\"lng\":" + String(hasFix ? gps.location.lng() : 0.0, 6) + ",";
+  payload += "\"alt_m\":" + String(gps.altitude.isValid() ? gps.altitude.meters() : 0.0, 1) + ",";
+  payload += "\"speed_kmh\":" + String(gps.speed.isValid() ? gps.speed.kmph() : 0.0, 1) + ",";
+  payload += "\"course_deg\":" + String(gps.course.isValid() ? gps.course.deg() : 0.0, 1) + ",";
+  payload += "\"cardinal\":\"" + String(gps.course.isValid() ? TinyGPSPlus::cardinal(gps.course.deg()) : "N") + "\"";
+  payload += "},";
+
+  // MPU-6050 Telemetry Object
+  payload += "\"mpu\":{";
+  payload += "\"connected\":" + String(mpuConnected ? "true" : "false") + ",";
+  payload += "\"pitch\":" + String(mpuConnected ? mpuData.pitch : 0.0, 2) + ",";
+  payload += "\"roll\":" + String(mpuConnected ? mpuData.roll : 0.0, 2) + ",";
+  payload += "\"total_accel_g\":" + String(mpuConnected ? mpuData.total_accel_g : 0.0, 2) + ",";
+  payload += "\"ax\":" + String(mpuConnected ? mpuData.ax : 0.0, 3) + ",";
+  payload += "\"ay\":" + String(mpuConnected ? mpuData.ay : 0.0, 3) + ",";
+  payload += "\"az\":" + String(mpuConnected ? mpuData.az : 0.0, 3) + ",";
+  payload += "\"gx\":" + String(mpuConnected ? mpuData.gx : 0.0, 2) + ",";
+  payload += "\"gy\":" + String(mpuConnected ? mpuData.gy : 0.0, 2) + ",";
+  payload += "\"gz\":" + String(mpuConnected ? mpuData.gz : 0.0, 2) + "";
+  payload += "}";
+
+  payload += "}";
+
+  // HTTP / HTTPS POST Transmission
+  HTTPClient http;
+  http.setTimeout(3000);
+  unsigned long startT = millis();
+  bool isHttps = String(SERVER_API_URL).startsWith("https://");
+  int httpCode = 0;
+
+  if (isHttps) {
+    WiFiClientSecure secureClient;
+    secureClient.setInsecure(); // Skip certificate verification for embedded TLS
+    secureClient.setTimeout(3000);
+    if (http.begin(secureClient, SERVER_API_URL)) {
+      http.addHeader("Content-Type", "application/json");
+      httpCode = http.POST(payload);
+      if (httpCode > 0) {
+        lastServerResponse = http.getString();
+      } else {
+        lastServerResponse = http.errorToString(httpCode);
+      }
+      http.end();
+    }
+  } else {
+    WiFiClient client;
+    client.setTimeout(3000);
+    if (http.begin(client, SERVER_API_URL)) {
+      http.addHeader("Content-Type", "application/json");
+      httpCode = http.POST(payload);
+      if (httpCode > 0) {
+        lastServerResponse = http.getString();
+      } else {
+        lastServerResponse = http.errorToString(httpCode);
+      }
+      http.end();
+    }
+  }
+
+  lastServerDurationMs = millis() - startT;
+  lastServerHttpCode = httpCode;
+
+  if (httpCode >= 200 && httpCode < 300) {
+    serverSuccessCount++;
+    Serial.printf("[SERVER] Telemetry Ingest SUCCESS (HTTP %d, %lums): %s\n",
+                  httpCode, lastServerDurationMs, lastServerResponse.c_str());
+  } else if (httpCode > 0) {
+    serverFailCount++;
+    Serial.printf("[SERVER] Telemetry Ingest WARN (HTTP %d, %lums): %s\n",
+                  httpCode, lastServerDurationMs, lastServerResponse.c_str());
+  } else {
+    serverFailCount++;
+    Serial.printf("[SERVER] Telemetry Ingest FAILED: %s (code %d, %lums)\n",
+                  http.errorToString(httpCode).c_str(), httpCode, lastServerDurationMs);
+  }
+
+  // Drain GPS serial buffer again after network request
+  while (gpsSerial.available() > 0) {
+    char c = gpsSerial.read();
+    gps.encode(c);
+    lastGpsByteMillis = millis();
+  }
+}
+
+/* ====================================================================
+ * 7. WEB SERVER HANDLERS & OTA CONTROLLER
+ * ==================================================================== */
+
+void handleRoot() {
+  server.send_P(200, "text/html", INDEX_HTML);
+}
+
+void handleData() {
+  // Feed GPS characters to keep parser fresh
+  while (gpsSerial.available() > 0) {
+    char c = gpsSerial.read();
+    gps.encode(c);
+    lastGpsByteMillis = millis();
+  }
+
+  // 1. Hardware Communication & Alive Check
+  bool gpsHwAlive = (lastGpsByteMillis > 0 && (millis() - lastGpsByteMillis < 2500));
+  bool hasFix = gps.location.isValid() && (gps.location.age() < 5000);
+  int sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
+
+  String hwStatus;
+  if (!gpsHwAlive) {
+    if (gps.charsProcessed() == 0) {
+      hwStatus = "DEAD / NO DATA RECEIVED";
+    } else {
+      hwStatus = "COMM TIMEOUT / STALLED";
+    }
+  } else {
+    hwStatus = "ALIVE & STREAMING";
+  }
+
+  // 2. Satellite Constellation Search & Lock Stage
+  String fixStage;
+  String statusDetail;
+  if (!gpsHwAlive) {
+    fixStage = "OFFLINE";
+    statusDetail = "GPS is NOT transmitting data to ESP32. Check 5V power and ensure GPS TX pin connects to ESP32 GPIO 16 (RX2).";
+  } else if (hasFix) {
+    fixStage = "3D FIX LOCKED (" + String(sats) + " SATS)";
+    statusDetail = "Active 3D satellite lock acquired. High-precision navigation coordinates valid.";
+  } else if (sats == 0) {
+    fixStage = "SEARCHING SATELLITES (0 SATS)";
+    statusDetail = "Hardware is ALIVE and transmitting NMEA sentences. It is currently searching the sky for satellite signals. Indoor walls block GPS signals; move antenna near a window or outdoors.";
+  } else if (sats < 4) {
+    fixStage = "ACQUIRING FIX (" + String(sats) + "/4 SATS)";
+    statusDetail = "Detecting " + String(sats) + " satellite carrier signal(s). Minimum 4 satellites required for 3D coordinate lock.";
+  } else {
+    fixStage = "CALCULATING 3D FIX (" + String(sats) + " SATS)";
+    statusDetail = "Tracking " + String(sats) + " satellites. Synchronizing ephemeris & clock data...";
+  }
+
+  // Format UTC Date & Time
+  char dateBuf[16] = "----/--/--";
+  char timeBuf[16] = "--:--:--";
+  if (gps.date.isValid()) {
+    snprintf(dateBuf, sizeof(dateBuf), "%04d/%02d/%02d", 
+             gps.date.year(), gps.date.month(), gps.date.day());
+  }
+  if (gps.time.isValid()) {
+    snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d:%02d", 
+             gps.time.hour(), gps.time.minute(), gps.time.second());
+  }
+
+  String json = "{";
+
+  // System
+  json += "\"sys\":{";
+  json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+  json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
+  json += "\"uptime_sec\":" + String(millis() / 1000) + ",";
+  json += "\"free_heap\":" + String(ESP.getFreeHeap());
+  json += "},";
+
+  // GPS (Detailed Hardware & Constellation Status)
+  json += "\"gps\":{";
+  json += "\"hw_alive\":" + String(gpsHwAlive ? "true" : "false") + ",";
+  json += "\"hw_status\":\"" + hwStatus + "\",";
+  json += "\"fix_stage\":\"" + fixStage + "\",";
+  json += "\"status_detail\":\"" + statusDetail + "\",";
+  json += "\"last_rx_ms\":" + String(lastGpsByteMillis > 0 ? (millis() - lastGpsByteMillis) : 999999) + ",";
+  json += "\"connected\":" + String(gps.charsProcessed() > 0 ? "true" : "false") + ",";
+  json += "\"fix\":" + String(hasFix ? "true" : "false") + ",";
+  json += "\"satellites\":" + String(sats) + ",";
+  json += "\"hdop\":" + String(gps.hdop.isValid() ? gps.hdop.hdop() : 0.0, 2) + ",";
+  json += "\"lat\":" + String(hasFix ? gps.location.lat() : 0.0, 6) + ",";
+  json += "\"lng\":" + String(hasFix ? gps.location.lng() : 0.0, 6) + ",";
+  json += "\"alt_m\":" + String(gps.altitude.isValid() ? gps.altitude.meters() : 0.0, 1) + ",";
+  json += "\"alt_ft\":" + String(gps.altitude.isValid() ? gps.altitude.feet() : 0.0, 1) + ",";
+  json += "\"speed_kmh\":" + String(gps.speed.isValid() ? gps.speed.kmph() : 0.0, 1) + ",";
+  json += "\"speed_mph\":" + String(gps.speed.isValid() ? gps.speed.mph() : 0.0, 1) + ",";
+  json += "\"course_deg\":" + String(gps.course.isValid() ? gps.course.deg() : 0.0, 1) + ",";
+  json += "\"cardinal\":\"" + String(gps.course.isValid() ? TinyGPSPlus::cardinal(gps.course.deg()) : "--") + "\",";
+  json += "\"date\":\"" + String(dateBuf) + "\",";
+  json += "\"time\":\"" + String(timeBuf) + "\",";
+  json += "\"fix_age_ms\":" + String(gps.location.isValid() ? gps.location.age() : 0) + ",";
+  json += "\"chars_rx\":" + String(gps.charsProcessed()) + ",";
+  json += "\"checksum_fail\":" + String(gps.failedChecksum());
+  json += "},";
+
+  // MPU-6050
+  json += "\"mpu\":{";
+  json += "\"connected\":" + String(mpuConnected ? "true" : "false") + ",";
+  if (mpuConnected) {
+    json += "\"ax\":" + String(mpuData.ax, 3) + ",";
+    json += "\"ay\":" + String(mpuData.ay, 3) + ",";
+    json += "\"az\":" + String(mpuData.az, 3) + ",";
+    json += "\"ax_g\":" + String(mpuData.ax_g, 3) + ",";
+    json += "\"ay_g\":" + String(mpuData.ay_g, 3) + ",";
+    json += "\"az_g\":" + String(mpuData.az_g, 3) + ",";
+    json += "\"total_accel_g\":" + String(mpuData.total_accel_g, 2) + ",";
+    json += "\"gx\":" + String(mpuData.gx, 2) + ",";
+    json += "\"gy\":" + String(mpuData.gy, 2) + ",";
+    json += "\"gz\":" + String(mpuData.gz, 2) + ",";
+    json += "\"gx_rad\":" + String(mpuData.gx_rad, 3) + ",";
+    json += "\"gy_rad\":" + String(mpuData.gy_rad, 3) + ",";
+    json += "\"gz_rad\":" + String(mpuData.gz_rad, 3) + ",";
+    json += "\"temp_c\":" + String(mpuData.temp_c, 1) + ",";
+    json += "\"temp_f\":" + String(mpuData.temp_f, 1) + ",";
+    json += "\"pitch\":" + String(mpuData.pitch, 1) + ",";
+    json += "\"roll\":" + String(mpuData.roll, 1);
+  } else {
+    json += "\"ax\":0,\"ay\":0,\"az\":0,\"ax_g\":0,\"ay_g\":0,\"az_g\":0,\"total_accel_g\":0,";
+    json += "\"gx\":0,\"gy\":0,\"gz\":0,\"gx_rad\":0,\"gy_rad\":0,\"gz_rad\":0,";
+    json += "\"temp_c\":0,\"temp_f\":0,\"pitch\":0,\"roll\":0";
+  }
+  json += "},";
+
+  // Server Uplink Telemetry Status
+  json += "\"server\":{";
+  json += "\"url\":\"" + String(SERVER_API_URL) + "\",";
+  json += "\"last_code\":" + String(lastServerHttpCode) + ",";
+  json += "\"last_latency_ms\":" + String(lastServerDurationMs) + ",";
+  json += "\"success_count\":" + String(serverSuccessCount) + ",";
+  json += "\"fail_count\":" + String(serverFailCount) + ",";
+  json += "\"last_send_ago_ms\":" + String(lastServerSendMillis > 0 ? (millis() - lastServerSendMillis) : 999999) + ",";
+  String cleanResp = lastServerResponse;
+  cleanResp.replace("\"", "'");
+  cleanResp.replace("\n", " ");
+  cleanResp.replace("\r", " ");
+  json += "\"last_response\":\"" + cleanResp + "\"";
+  json += "}";
+
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
 
 void setupWebOTA() {
   server.on("/update", HTTP_GET, []() {
@@ -1243,112 +1069,137 @@ void setupArduinoOTA() {
   if (strlen(otaPassword) > 0) {
     ArduinoOTA.setPassword(otaPassword);
   }
+
+  ArduinoOTA.onStart([]() {
+    String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
+    Serial.println("[ArduinoOTA] Network flash initiated: " + type);
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\n[ArduinoOTA] Flash complete. Rebooting...");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("[ArduinoOTA] Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("[ArduinoOTA] Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+
   ArduinoOTA.begin();
+  Serial.println("[ArduinoOTA] Network background listener ready.");
 }
 
 void handleNotFound() {
-  server.send(404, "text/plain", "404: Not Found on ESP32 GSM Gateway");
+  server.send(404, "text/plain", "404: Route Not Found on ESP32 Telemetry Server");
 }
 
 /* ====================================================================
- * 8. SETUP & MAIN LOOP
+ * 8. SETUP & LOOP
  * ==================================================================== */
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(500);
 
   Serial.println("\n==============================================");
-  Serial.println("  ESP32 GSM CELLULAR CALL & SMS GATEWAY");
+  Serial.println("  ESP32 TELEMETRY SERVER (GPS + MPU-6050 + OTA)");
   Serial.println("==============================================");
 
-  // Initialize Hardware Serial for SIM900A GSM Module
-  gsmSerial.begin(GSM_BAUD_RATE, SERIAL_8N1, GSM_RX_PIN, GSM_TX_PIN);
-  Serial.printf("[SIM900A] Hardware Serial initialized on RX: %d, TX: %d @ %d baud\n", GSM_RX_PIN, GSM_TX_PIN, GSM_BAUD_RATE);
+  // Initialize Hardware Serial 2 for NEO-6M GPS (RX: 16, TX: 17)
+  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  Serial.printf("[GPS] Hardware Serial 2 started at %d baud (RX: GPIO%d, TX: GPIO%d)\n", 
+                GPS_BAUD, GPS_RX_PIN, GPS_TX_PIN);
 
-  addLog("ESP32 SIM900A Gateway Initialized.");
+  // Initialize I2C and MPU-6050 IMU
+  initMPU6050();
 
-  // SIM900A Auto-Baud Synchronization (Sends AT bursts to lock baud rate)
-  Serial.println("[SIM900A] Synchronizing baud rate with SIM900A...");
-  for (int i = 0; i < 6; i++) {
-    gsmSerial.print("AT\r\n");
-    delay(250);
-    while (gsmSerial.available()) gsmSerial.read();
-  }
-  // Lock SIM900A to 9600 baud, disable echo, set SMS text mode
-  gsmSerial.print("AT+IPR=9600\r\n");
-  delay(150);
-  gsmSerial.print("ATE0\r\n");
-  delay(150);
-  gsmSerial.print("AT+CMGF=1\r\n");
-  delay(150);
+  // Initialize Onboard LED (blinks while connecting, glows solid once connected)
+  pinMode(ONBOARD_LED_PIN, OUTPUT);
+  digitalWrite(ONBOARD_LED_PIN, LOW);
 
   // Connect to Wi-Fi
+  WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.printf("[WIFI] Connecting to '%s'", WIFI_SSID);
 
   unsigned long startAttemptTime = millis();
+  bool blinkState = false;
   while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
     delay(500);
+    blinkState = !blinkState;
+    digitalWrite(ONBOARD_LED_PIN, blinkState ? HIGH : LOW);
     Serial.print(".");
   }
   Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("[WIFI] Connected! Gateway IP: ");
+    digitalWrite(ONBOARD_LED_PIN, HIGH); // Solid ON when Wi-Fi is connected
+    Serial.print("[WIFI] Connected! Assigned IP: ");
     Serial.println(WiFi.localIP());
   } else {
-    Serial.println("[WIFI] Router connection timed out. Starting SoftAP Fallback...");
+    digitalWrite(ONBOARD_LED_PIN, LOW);
+    Serial.println("[WIFI] Connection timed out. Starting SoftAP Fallback...");
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASSWORD);
     Serial.printf("[WIFI] SoftAP active! SSID: '%s' | Password: '%s'\n", AP_SSID, AP_PASSWORD);
-    Serial.print("[WIFI] Access gateway at: http://");
+    Serial.print("[WIFI] Access at: http://");
     Serial.println(WiFi.softAPIP());
   }
 
+  // Setup mDNS
   if (MDNS.begin(MDNS_HOSTNAME)) {
     Serial.printf("[mDNS] Responding at: http://%s.local\n", MDNS_HOSTNAME);
     MDNS.addService("http", "tcp", 80);
   }
 
+  // Setup Web Server Routes & OTA Services
   server.on("/", HTTP_GET, handleRoot);
-  server.on("/api/status", HTTP_GET, handleStatus);
-  server.on("/api/call", HTTP_GET, handleCall);
-  server.on("/api/hangup", HTTP_GET, handleHangup);
-  server.on("/api/send-sms", HTTP_GET, handleSendSms);
-  server.on("/api/at", HTTP_GET, handleCustomAt);
+  server.on("/api/data", HTTP_GET, handleData);
+  server.on("/api/send_now", HTTP_GET, []() {
+    sendTelemetryToServer();
+    server.send(200, "application/json", "{\"status\":\"TRIGGERED\",\"http_code\":" + String(lastServerHttpCode) + "}");
+  });
   setupWebOTA();
   server.onNotFound(handleNotFound);
   server.begin();
-  Serial.println("[HTTP] Web server listening on port 80.");
+  Serial.println("[HTTP] Web server started on port 80.");
 
+  // Setup ArduinoOTA for PlatformIO Network Flashing
   setupArduinoOTA();
-
-  queryGsmStatus();
 }
 
 void loop() {
   server.handleClient();
   ArduinoOTA.handle();
 
-  while (gsmSerial.available()) {
-    String asyncLine = gsmSerial.readStringUntil('\n');
-    asyncLine.trim();
-    if (asyncLine.length() > 0) {
-      addLog("< [ASYNC] " + asyncLine);
-      if (asyncLine.indexOf("RING") >= 0) {
-        activeCallState = "INCOMING CALL RINGING...";
-      } else if (asyncLine.indexOf("NO CARRIER") >= 0) {
-        activeCallState = "IDLE (CALL DISCONNECTED)";
-      } else if (asyncLine.indexOf("BUSY") >= 0) {
-        activeCallState = "IDLE (LINE BUSY)";
-      }
-    }
+  // Onboard LED Status Indicator: Glows SOLID when Wi-Fi is connected
+  if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(ONBOARD_LED_PIN, HIGH); // Solid ON when Wi-Fi is connected
+  } else {
+    digitalWrite(ONBOARD_LED_PIN, (millis() % 1000 < 150) ? HIGH : LOW); // Short pulse if disconnected
   }
 
+  // Feed GPS parser from Hardware Serial 2 & track arrival time
+  while (gpsSerial.available() > 0) {
+    char c = gpsSerial.read();
+    gps.encode(c);
+    lastGpsByteMillis = millis();
+  }
+
+  // Read MPU-6050 at 10 Hz
   unsigned long now = millis();
-  if (now - lastStatusCheck >= STATUS_CHECK_INTERVAL_MS) {
-    lastStatusCheck = now;
-    queryGsmStatus();
+  if (now - lastSensorReadTime >= SENSOR_INTERVAL_MS) {
+    lastSensorReadTime = now;
+    readMPU6050();
+  }
+
+  // Periodic Telemetry Transmission to HYDRA Server API (every 2.0s per a.md)
+  if (now - lastServerSendMillis >= TELEMETRY_SEND_INTERVAL_MS) {
+    lastServerSendMillis = now;
+    sendTelemetryToServer();
   }
 }
