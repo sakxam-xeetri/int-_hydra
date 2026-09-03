@@ -354,20 +354,92 @@ $$\text{Payload} = \texttt{"TX[DEVICE\_ID],[ALERT\_CODE]"}$$
 | `13` | `N` | **EQUIPMENT FAILURE**| Node sensor disconnect / timeout | `MEDIUM` (2) |
 | `4` | `E` | **STATUS OK** | Normal baseline telemetry | `OK` (3) |
 
-### B. 📱 GSM Cellular Call & SMS Gateway (`ESP32_GSM_Call_SMS_Dashboard.ino`)
-When thresholds are breached, the GSM gateway triggers automated emergency dispatch:
-- **Phone Call**: Directly dials emergency response numbers (`ATD+<PHONE_NUMBER>;`) to immediately alert field officers.
-- **SMS Dispatch**: Transmits SMS alerts containing the latest critical telemetry:
-  ```text
-  [HYDRA ALERT]
-  NODE: LANDSLIDE-01
-  LOCATION: 27.717245 N, 85.324061 E
-  PITCH: 14.8 DEG | ROLL: 11.2 DEG
-  SHOCK: 1.82 G
-  TIME: 2026/09/03 12:35:48 UTC
-  ```
+### B. 📱 GSM Cellular Call, SMS & Alert Gateway (`ESP32_GSM_Call_SMS_Dashboard.ino`)
+
+The **HYDRA GSM Cellular Gateway** functions as an active telephony, SMS dispatch, and visual/audible alert node for the early warning network.
+
+#### 📌 Hardware Pin Mapping
+| Hardware Signal | Standard ESP32 (Dev Module) | ESP32-S3 / Nano ESP32 | Target Module / Peripheral |
+| :--- | :--- | :--- | :--- |
+| **GSM Module TX** | `GPIO 16` (`RX2`) | `GPIO 4` | SIM800L / SIM900 / SIM900A TXD |
+| **GSM Module RX** | `GPIO 17` (`TX2`) | `GPIO 5` | SIM800L / SIM900 / SIM900A RXD |
+| **System Status LED** | `GPIO 2` | `GPIO 13` | Onboard Blue LED (Heartbeat / Traffic) |
+| **Alert Strobe LED** | `GPIO 12` | `GPIO 7` | Red High-Intensity Strobe Warning LED |
+| **Audible Siren / Buzzer** | `GPIO 14` | `GPIO 6` | 5V Piezo Siren Relay / Driver |
 
 ---
+
+#### 📡 GSM Gateway REST API Endpoints
+
+| Endpoint | HTTP Method | Parameters | Description |
+| :--- | :--- | :--- | :--- |
+| **`/api/status`** or **`/api/data`** | `GET` | None | Retrieves live telemetry, signal strength, cellular operator, call state, alert state, and LED modes. |
+| **`/api/call`** | `GET` / `POST` | `num` or `number` | Initiates outbound cellular voice call (`ATD+<PHONE_NUMBER>;`). |
+| **`/api/hangup`** | `GET` / `POST` | None | Terminates active voice call (`ATH`) and resets calling state. |
+| **`/api/send-sms`** | `GET` / `POST` | `num`, `msg` | Transmits SMS message to recipient number. |
+| **`/api/alert`** | `GET` / `POST` | `node`, `level`, `msg`, `num`, `call`, `sms`, `clear` | Triggers or disarms emergency alert. Automatically dispatches call, SMS, and LED strobe. |
+| **`/api/led`** | `GET` / `POST` | `alert`, `status`, `siren` | Directly controls Alert Strobe LED (`off`/`on`/`blink`/`strobe`), Status LED (`heartbeat`/`busy`/`error`), and Siren (`on`/`off`). |
+| **`/api/at`** | `GET` / `POST` | `cmd` | Executes raw AT command on GSM module and returns response. |
+
+---
+
+#### 💡 LED & Siren Hardware Indication Modes
+- **Status LED (`STATUS_LED_PIN`)**:
+  - `HEARTBEAT`: 100ms pulse every 1500ms (Normal operations & network connected).
+  - `BUSY`: 100ms flash (AT command execution / active call / SMS transmission).
+  - `ERROR`: Fast 250ms blink (Modem offline or network registration failed).
+- **Alert Strobe LED (`ALERT_LED_PIN`)**:
+  - `OFF`: Normal standby mode.
+  - `BLINK`: 250ms blink (Warning hazard stage).
+  - `STROBE`: High-speed 60ms strobe flash (Critical / Emergency hazard stage).
+- **Audible Siren (`SIREN_PIN`)**:
+  - `HIGH`: Active alarm during `CRITICAL` or `EMERGENCY` alerts.
+
+---
+
+#### 📦 Sample GSM Status JSON Payload (`GET /api/status`)
+```json
+{
+  "sys": {
+    "ip": "192.168.1.100",
+    "rssi": -62,
+    "uptime_sec": 4210,
+    "free_heap": 245120,
+    "pins": { "gsm_rx": 16, "gsm_tx": 17, "status_led": 2, "alert_led": 12, "siren": 14 }
+  },
+  "gsm": {
+    "alive": true,
+    "rssi": 22,
+    "signal_percent": 70,
+    "signal_dbm": -69,
+    "network_reg": 1,
+    "operator": "NCELL",
+    "status_text": "CONNECTED (HOME NETWORK)"
+  },
+  "call": {
+    "state": "IDLE",
+    "last_number": "+9779800000000"
+  },
+  "alert": {
+    "active": true,
+    "level": "EMERGENCY",
+    "source_node": "FLOOD-MODI-KHOLA",
+    "message": "Water level clearance < 20cm! Flash flood imminent!"
+  },
+  "led": {
+    "status_mode": "HEARTBEAT",
+    "alert_mode": "STROBE",
+    "siren_active": true
+  },
+  "action": {
+    "text": "ALERT DISPATCHED: EMERGENCY (FLOOD-MODI-KHOLA)",
+    "success": true
+  }
+}
+```
+
+---
+
 
 ## 5. 🌐 Consolidated Multi-Node Aggregated Data Schema
 
