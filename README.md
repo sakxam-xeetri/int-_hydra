@@ -110,3 +110,10 @@ Once the ESP8266 connects to your Wi-Fi:
 ## 💨 MQ-135 Warm-Up & Calibration Note
 - The MQ-135 has an internal tin dioxide ($SnO_2$) heating layer. When powered on for the first time, allow it to preheat for **24 to 48 hours** for full burn-in. For daily use, allow **1 to 3 minutes** for the reading to stabilize after boot.
 - The firmware automatically applies a **temperature & humidity correction factor** to the MQ-135 reading based on the live DHT11 telemetry.
+
+---
+
+## 📋 Comprehensive Multi-Node Telemetry Documentation
+For a complete parameter dictionary, JSON schemas, pinouts, and warning thresholds for the **Fire Node**, **Flood Node**, and **Landslide Node**, see:
+👉 **[NODE_PARAMETERS.md](file:///e:/Downloads/HYDRA/NODE_PARAMETERS.md)**
+
