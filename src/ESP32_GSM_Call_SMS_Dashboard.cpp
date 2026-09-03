@@ -7,9 +7,10 @@
  * Hardware Output : Status LED (GPIO 2 / 13), Alert Strobe LED (GPIO 12 / 7), Siren Relay (GPIO 14 / 6)
  * Cloud Endpoint  : https://zenithkandel.com.np/hydra/backend/api/nodes/level1.php
  * Wi-Fi           : SSID "sakshyam" | Password "sakshyam"
- * Features        : Power-On Startup Boot Call, 1-Time Call per Alert Type,
- *                   Cloud API Uplink Integration, Automated Emergency Calls & SMS,
- *                   Hardware Siren/LED Indication, Local Web Dashboard, Live AT Console
+ * Features        : Wi-Fi Watchdog & Resilient Cloud Synchronization Engine,
+ *                   Power-On Startup Boot Call, 1-Time Call per Alert Type,
+ *                   Automated Emergency Calls & SMS, 5V Active-LOW Relay Control,
+ *                   Local Web Dashboard, Live AT Console
  * ==================================================================== */
 
 #include <Arduino.h>
@@ -43,6 +44,7 @@ const char* otaPassword   = "admin";
 const char* API_LEVEL1_URL = "https://zenithkandel.com.np/hydra/backend/api/nodes/level1.php";
 const unsigned long CLOUD_POLL_INTERVAL_MS = 1500; // Poll server every 1.5s
 unsigned long lastCloudPollTime = 0;
+int cloudPollFailCount = 0;
 
 /* ====================================================================
  * 2. HARDWARE PIN DEFINITIONS & MAPPING
@@ -60,7 +62,7 @@ unsigned long lastCloudPollTime = 0;
   #define GSM_UART_NUM   2
   #define STATUS_LED_PIN 2   // Standard ESP32 Onboard LED (GPIO 2)
   #define ALERT_LED_PIN  12  // High-Intensity Strobe Alert LED (GPIO 12)
-  #define SIREN_PIN      14  // Siren / Buzzer Control Pin (GPIO 14)
+  #define SIREN_PIN      14  // Siren / Buzzer Relay Control Pin (GPIO 14)
 #endif
 
 // Siren / Buzzer Drive Polarity:
@@ -188,7 +190,7 @@ void updateHardwareOutputs() {
   }
   digitalWrite(ALERT_LED_PIN, alertLedCurState);
 
-  // 3. Siren Control (Active-LOW: LOW = ON, HIGH = OFF)
+  // 3. Siren Control (Active-LOW Relay: LOW = ON, HIGH = OFF)
   digitalWrite(SIREN_PIN, sirenActive ? (SIREN_ACTIVE_LOW ? LOW : HIGH) : (SIREN_ACTIVE_LOW ? HIGH : LOW));
 }
 
@@ -457,7 +459,7 @@ bool triggerAlert(String node, String level, String msg, String targetNum, bool 
   alertMessage = msg;
   alertStartTime = millis();
 
-  String alertKey = node + ":" + level;
+  String alertKey = node + ":" + level + ":" + msg;
 
   addLog("[ALERT ENGINE] Emergency Alert Triggered! Node: " + node + " | Level: " + level);
 
@@ -486,7 +488,7 @@ bool triggerAlert(String node, String level, String msg, String targetNum, bool 
       callResult = gsmMakeCall(targetNum);
     }
     lastDispatchedAlertType = alertKey;
-    addLog("[ALERT ENGINE] Dispatched 1-time call/SMS for alert type: " + alertKey);
+    addLog("[ALERT ENGINE] Dispatched 1-time call/SMS for alert: " + alertKey);
   } else {
     addLog("[ALERT ENGINE] Alert '" + alertKey + "' already dispatched. Skipping duplicate call.");
   }
@@ -517,7 +519,7 @@ void clearAlert() {
 }
 
 /* ====================================================================
- * 7. CLOUD SERVER POLLING ROUTINE (per a.md Section 3)
+ * 7. FLAWLESS CLOUD SERVER POLLING & SYNC ROUTINE (per a.md Section 3)
  * ==================================================================== */
 void pollLevel1CloudServer() {
   if (WiFi.status() != WL_CONNECTED || isOperationInProgress) return;
@@ -535,6 +537,7 @@ void pollLevel1CloudServer() {
   int httpCode = http.GET();
 
   if (httpCode == 200) {
+    cloudPollFailCount = 0;
     cloudPollConnected = true;
     String payload = http.getString();
 
@@ -547,6 +550,7 @@ void pollLevel1CloudServer() {
       bool emergency = data["emergency"] | false;
       const char* sirenStr = data["siren"] | "OFF";
       cloudEmergencyActive = emergency;
+      cloudSirenState = String(sirenStr);
 
       // 1. Siren & Strobe Hardware Control
       if (emergency || strcmp(sirenStr, "ON") == 0) {
@@ -567,12 +571,14 @@ void pollLevel1CloudServer() {
           smsMsg = data["gsm_message"].as<String>();
         }
 
-        // Strictly 1-Time Call & SMS per Server Alert Type
-        if (serverAlertType != lastDispatchedAlertType && targetPhone.length() > 2) {
-          addLog("[CLOUD DISPATCH] New Server Alert '" + serverAlertType + "' received. Dispatching 1-time call to " + targetPhone);
+        String alertDispatchKey = targetPhone + ":" + serverAlertType + ":" + smsMsg;
+
+        // Strictly 1-Time Call & SMS per Server Alert Event
+        if (alertDispatchKey != lastDispatchedAlertType && targetPhone.length() > 2) {
+          addLog("[FLAWLESS CLOUD SYNC] Emergency Server Alert '" + serverAlertType + "' received. Dispatching 1-time call & SMS to " + targetPhone);
           gsmSendSMS(targetPhone, smsMsg);
           gsmMakeCall(targetPhone);
-          lastDispatchedAlertType = serverAlertType;
+          lastDispatchedAlertType = alertDispatchKey;
         }
       } else {
         if (isAlertActive && alertSourceNode == "LEVEL_1_VILLAGE_MASTER") {
@@ -583,6 +589,7 @@ void pollLevel1CloudServer() {
           alertLedMode = ALERT_OFF;
           sirenActive = false;
           lastDispatchedAlertType = ""; // Reset dispatch tracker when server clears emergency
+          addLog("[FLAWLESS CLOUD SYNC] Server emergency cleared. Muting siren relay & disarming alert engine.");
         }
       }
 
@@ -593,7 +600,10 @@ void pollLevel1CloudServer() {
       }
     }
   } else {
-    cloudPollConnected = false;
+    cloudPollFailCount++;
+    if (cloudPollFailCount >= 3) {
+      cloudPollConnected = false;
+    }
   }
   http.end();
 }
@@ -1087,7 +1097,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
             </div>
           </div>
           <div class="form-group">
-            <label>AUDIBLE SIREN / BUZZER</label>
+            <label>AUDIBLE SIREN / BUZZER RELAY</label>
             <div class="btn-row">
               <button class="btn outline" onclick="controlLed('siren', 'off')">SIREN OFF</button>
               <button class="btn danger" onclick="controlLed('siren', 'on')">SIREN ON</button>
@@ -1779,7 +1789,7 @@ void setup() {
   setupWebOTA();
   server.onNotFound(handleNotFound);
   server.begin();
-  Serial.println("[HTTP] Web server listening on port 80 with Power-On & 1-Time Dispatch Logic.");
+  Serial.println("[HTTP] Web server listening on port 80 with Resilient Cloud Sync Engine.");
 
   setupArduinoOTA();
 
@@ -1793,19 +1803,29 @@ void loop() {
 
   unsigned long now = millis();
 
-  // Poll Production Level 1 Cloud Server Endpoint (per a.md Section 3)
+  // 1. Wi-Fi Watchdog & Automatic Reconnection
+  if (WiFi.status() != WL_CONNECTED) {
+    static unsigned long lastWifiReconnect = 0;
+    if (now - lastWifiReconnect >= 5000) {
+      lastWifiReconnect = now;
+      addLog("[WIFI WATCHDOG] Connection lost. Reconnecting to " + String(WIFI_SSID) + "...");
+      WiFi.reconnect();
+    }
+  }
+
+  // 2. Poll Production Level 1 Cloud Server Endpoint (per a.md Section 3)
   if (now - lastCloudPollTime >= CLOUD_POLL_INTERVAL_MS) {
     lastCloudPollTime = now;
     pollLevel1CloudServer();
   }
 
-  // Modem Periodic Check
+  // 3. Modem Periodic Check
   if (now - lastStatusCheck >= STATUS_CHECK_INTERVAL_MS) {
     lastStatusCheck = now;
     queryGsmStatus();
   }
 
-  // Async UART responses from GSM Modem
+  // 4. Async UART responses from GSM Modem
   while (gsmSerial.available()) {
     String asyncLine = gsmSerial.readStringUntil('\n');
     asyncLine.trim();
