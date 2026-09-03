@@ -1,9 +1,9 @@
 /* ====================================================================
- * ESP32-S3 SUPER MINI - ULTRASONIC DISTANCE MONITOR & WEB DASHBOARD
+ * ESP32-S3 SUPER MINI - ULTRASONIC RADAR & PROXIMITY BLINK SENSOR
  * Hardware : ESP32-S3 Super Mini + HC-SR04 Ultrasonic Sensor + Alert LED
  * Wi-Fi    : SSID "sakshyam" | Password "sakshyam"
  * UI Theme : Stark High-Contrast Monochrome (Black & White, 0px Radius)
- * Feature  : Real-Time Distance Telemetry + Dynamic High-Distance LED Alert
+ * Feature  : Proximity Radar (Fast Blink = Near, Slow Blink = Far)
  * ==================================================================== */
 
 #include <Arduino.h>
@@ -38,7 +38,7 @@ const char* otaPassword   = "admin";
 #define ECHO_PIN         5  // GPIO 5 -> Ultrasonic ECHO pin
 
 // LED Indicators
-#define HIGH_DIST_LED    7  // GPIO 7 -> External High Distance Indicator LED (Anode via 220Ω resistor)
+#define HIGH_DIST_LED    7  // GPIO 7 -> External Indicator LED (Anode via 220Ω resistor)
 #define ONBOARD_LED      8  // GPIO 8 -> On-Board Blue LED on ESP32-S3 Super Mini
 
 /* ====================================================================
@@ -46,19 +46,21 @@ const char* otaPassword   = "admin";
  * ==================================================================== */
 WebServer server(80);
 
-// High distance alert threshold (can be adjusted dynamically from Web UI)
-float highDistanceThresholdCm = 100.0; // Default: 100 cm (1.0 meter)
-
-// Sensor readings cache
+// Sensor readings
 float currentDistanceCm = 0.0;
 float currentDistanceIn = 0.0;
 float currentDistanceM  = 0.0;
 unsigned long pulseDurationUs = 0;
-bool isHighDistanceAlert = false;
 bool isSensorValid = false;
 
+// Dynamic Proximity Blink State
+unsigned long currentBlinkIntervalMs = 1000;
+unsigned long lastBlinkToggleTime = 0;
+bool currentLedState = false;
+String proximityZone = "OUT OF RANGE";
+
 unsigned long lastMeasureTime = 0;
-const unsigned long MEASURE_INTERVAL_MS = 100; // Measure at 10 Hz (every 100ms)
+const unsigned long MEASURE_INTERVAL_MS = 60; // Measure distance at ~16 Hz for responsive radar
 
 /* ====================================================================
  * 4. EMBEDDED SHARP MONOCHROME WEB DASHBOARD HTML
@@ -68,7 +70,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ESP32-S3 // ULTRASONIC RADAR</title>
+  <title>ESP32-S3 // PROXIMITY RADAR</title>
   <style>
     * {
       box-sizing: border-box;
@@ -87,7 +89,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     }
 
     .container {
-      max-width: 900px;
+      max-width: 960px;
       margin: 0 auto;
     }
 
@@ -174,7 +176,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       background: #080808;
       padding: 24px;
       margin-bottom: 16px;
-      position: relative;
     }
 
     .hero-label {
@@ -196,7 +197,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     }
 
     .hero-value {
-      font-size: 64px;
+      font-size: 68px;
       font-weight: 900;
       letter-spacing: -1px;
       line-height: 1;
@@ -225,64 +226,64 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       color: #FFFFFF;
     }
 
-    /* ALERT STATUS BANNER */
-    .alert-banner {
-      border: 2px solid #333333;
-      padding: 14px 18px;
+    /* RADAR BLINK MONITOR CARD */
+    .radar-banner {
+      border: 2px solid #FFFFFF;
+      padding: 16px 20px;
       margin-bottom: 16px;
-      background: #0A0A0A;
-      display: flex;
-      justify-content: space-between;
+      background: #0D0D0D;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
       align-items: center;
-      flex-wrap: wrap;
-      gap: 10px;
     }
 
-    .alert-banner.active-alert {
-      border-color: #FFFFFF;
-      background: #151515;
-    }
-
-    .alert-state {
-      font-size: 16px;
-      font-weight: 900;
-      letter-spacing: 1.5px;
+    .radar-zone-title {
+      font-size: 10px;
+      color: #888888;
       text-transform: uppercase;
-      display: flex;
-      align-items: center;
-      gap: 8px;
+      letter-spacing: 1.5px;
+      margin-bottom: 4px;
     }
 
-    .led-pill {
-      display: inline-block;
-      padding: 6px 12px;
-      font-size: 12px;
+    .radar-zone-val {
+      font-size: 20px;
       font-weight: 900;
       letter-spacing: 1px;
       text-transform: uppercase;
-      border: 1px solid #FFFFFF;
     }
 
-    .led-pill.on {
-      background: #FFFFFF;
-      color: #000000;
-      box-shadow: 0 0 12px rgba(255,255,255,0.4);
-    }
-
-    .led-pill.off {
+    .led-hardware-box {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border: 1px solid #333333;
+      padding: 10px 14px;
       background: #000000;
-      color: #666666;
-      border-color: #333333;
     }
 
-    /* PROGRESS / RANGE BAR */
+    .led-strobe-indicator {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      background: #222222;
+      border: 1px solid #FFFFFF;
+      transition: background 0.05s ease;
+    }
+
+    .led-strobe-indicator.lit {
+      background: #FFFFFF;
+      box-shadow: 0 0 10px #FFFFFF;
+    }
+
+    /* RANGE GAUGE BAR */
     .bar-container {
-      margin: 14px 0 6px 0;
+      margin: 16px 0 6px 0;
       position: relative;
     }
 
     .bar-track {
-      height: 14px;
+      height: 16px;
       background: #111111;
       border: 1px solid #444444;
       position: relative;
@@ -293,7 +294,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       height: 100%;
       background: #FFFFFF;
       width: 0%;
-      transition: width 0.1s linear;
+      transition: width 0.08s linear;
     }
 
     .bar-scale {
@@ -305,110 +306,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       letter-spacing: 1px;
     }
 
-    /* GRID FOR PARAMETERS */
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 12px;
-      margin-bottom: 16px;
-    }
-
-    .card {
-      border: 1px solid #333333;
-      background: #080808;
-      padding: 14px;
-    }
-
-    .card:hover {
-      border-color: #FFFFFF;
-    }
-
-    .card-label {
-      font-size: 10px;
-      color: #777777;
-      text-transform: uppercase;
-      letter-spacing: 1.5px;
-      font-weight: 700;
-      margin-bottom: 6px;
-      display: flex;
-      justify-content: space-between;
-    }
-
-    .card-value {
-      font-size: 24px;
-      font-weight: 800;
-      letter-spacing: 0.5px;
-      color: #FFFFFF;
-    }
-
-    .card-sub {
-      font-size: 11px;
-      color: #888888;
-      margin-top: 4px;
-    }
-
-    /* THRESHOLD CONTROLLER */
-    .ctrl-card {
-      border: 1px solid #FFFFFF;
-      background: #050505;
-      padding: 16px;
-      margin-bottom: 16px;
-    }
-
-    .ctrl-wrap {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      align-items: center;
-      margin-top: 10px;
-    }
-
-    input[type=number] {
-      background: #000000;
-      color: #FFFFFF;
-      border: 1px solid #FFFFFF;
-      padding: 10px 14px;
-      font-family: inherit;
-      font-size: 14px;
-      font-weight: 700;
-      width: 140px;
-      outline: none;
-    }
-
-    .btn {
-      display: inline-block;
-      padding: 10px 18px;
-      font-size: 11px;
-      font-weight: 800;
-      letter-spacing: 1px;
-      text-transform: uppercase;
-      color: #000000;
-      background: #FFFFFF;
-      border: 1px solid #FFFFFF;
-      cursor: pointer;
-      text-decoration: none;
-    }
-
-    .btn:hover {
-      background: #000000;
-      color: #FFFFFF;
-    }
-
-    .btn-quick {
-      background: #111111;
-      color: #FFFFFF;
-      border: 1px solid #333333;
-      padding: 10px 14px;
-      font-size: 11px;
-      font-weight: 700;
-      cursor: pointer;
-    }
-
-    .btn-quick:hover {
-      border-color: #FFFFFF;
-    }
-
-    /* TABLE */
+    /* EXPLANATION MATRIX */
     .table-container {
       border: 1px solid #333333;
       background: #080808;
@@ -470,12 +368,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     <!-- HEADER -->
     <header>
       <div class="title-group">
-        <h1>ESP32-S3 // ULTRASONIC RADAR</h1>
-        <p>SUPER MINI BOARD &bull; HC-SR04 SENSOR &bull; HIGH DISTANCE LED TRIGGER</p>
+        <h1>ESP32-S3 // PROXIMITY RADAR</h1>
+        <p>SUPER MINI BOARD &bull; PROPORTIONAL BLINK (FAST = NEAR, SLOW = FAR)</p>
       </div>
       <div class="badges">
         <span id="conn-badge" class="badge solid"><span class="pulse"></span> LIVE COMMS</span>
-        <span id="alert-badge" class="badge outline">STATUS: MONITORING</span>
+        <span id="zone-badge" class="badge outline">RADAR: ACTIVE</span>
         <a href="/update" class="badge link">&#9889; WEB OTA</a>
       </div>
     </header>
@@ -483,7 +381,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     <!-- SECTION 1: LIVE DISTANCE TELEMETRY -->
     <div class="section-title">
       <span>01 // REAL-TIME DISTANCE MEASUREMENT</span>
-      <span id="sample-rate" style="font-size: 10px; color: #888;">SAMPLING @ 10 HZ</span>
+      <span style="font-size: 10px; color: #888;">SAMPLING @ 16 HZ</span>
     </div>
 
     <!-- HERO DISTANCE DISPLAY -->
@@ -498,15 +396,15 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
         <div class="hero-unit">CENTIMETERS</div>
       </div>
 
-      <!-- VISUAL RANGE BAR GAUGE (0 - 400 CM) -->
+      <!-- VISUAL RANGE BAR GAUGE (0 - 300 CM) -->
       <div class="bar-container">
         <div class="bar-track">
           <div id="range-fill" class="bar-fill"></div>
         </div>
         <div class="bar-scale">
-          <span>0 CM</span>
-          <span id="thresh-marker" style="color: #FFF; font-weight: 700;">TRIGGER: 100 CM</span>
-          <span>400 CM (MAX)</span>
+          <span style="color:#FFF;">0 CM (FAST BLINK)</span>
+          <span>150 CM (MEDIUM BLINK)</span>
+          <span>300 CM (SLOW BLINK)</span>
         </div>
       </div>
 
@@ -517,48 +415,91 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- HIGH DISTANCE ALERT & LED INDICATOR BANNER -->
-    <div id="alert-box" class="alert-banner">
+    <!-- PROXIMITY RADAR & LED BLINK MONITOR -->
+    <div class="radar-banner">
       <div>
-        <div style="font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 4px;">HIGH DISTANCE THRESHOLD MONITOR:</div>
-        <div id="alert-state-text" class="alert-state">NORMAL RANGE (BELOW THRESHOLD)</div>
+        <div class="radar-zone-title">01. PROXIMITY RADAR ZONE:</div>
+        <div id="radar-zone-text" class="radar-zone-val">DETECTING...</div>
+        <div id="radar-sub-desc" style="font-size: 11px; color: #888; margin-top: 4px;">
+          PROPORTIONAL PULSE FREQUENCY
+        </div>
       </div>
-      <div style="display: flex; align-items: center; gap: 10px;">
-        <span style="font-size: 11px; color: #888; text-transform: uppercase;">GPIO 7/8 LED:</span>
-        <div id="led-indicator" class="led-pill off">LED: OFF</div>
+
+      <div class="led-hardware-box">
+        <div>
+          <div style="font-size: 10px; color: #888; text-transform: uppercase;">PHYSICAL LED (GPIO 7 &amp; 8):</div>
+          <div id="blink-freq-text" style="font-size: 14px; font-weight: 800; color: #FFF; margin-top: 2px;">
+            INTERVAL: -- MS
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span id="led-text-state" style="font-size: 11px; font-weight: 800;">SYNC</span>
+          <div id="web-led-indicator" class="led-strobe-indicator"></div>
+        </div>
       </div>
     </div>
 
-    <!-- SECTION 2: THRESHOLD CONTROLLER -->
+    <!-- SECTION 2: BLINK RATE MAPPING TABLE -->
     <div class="section-title">
-      <span>02 // HIGH DISTANCE TRIGGER THRESHOLD</span>
-      <span>RUNTIME CONFIG</span>
+      <span>02 // PROXIMITY BLINK FREQUENCY MAPPING</span>
+      <span>AUTOMATIC HARDWARE CONTROL</span>
     </div>
 
-    <div class="ctrl-card">
-      <div class="card-label">
-        <span>TRIGGER THRESHOLD (CM)</span>
-        <span>WHEN DISTANCE &gt; VALUE &rarr; LED TURNS ON</span>
-      </div>
-      <p style="font-size: 11px; color: #888; margin-top: 4px;">
-        Set the trigger distance in centimeters. When the ultrasonic sensor detects an obstacle farther than this threshold, the high-distance LED will turn ON.
-      </p>
-      
-      <div class="ctrl-wrap">
-        <input type="number" id="threshold-input" min="5" max="400" step="1" value="100">
-        <button class="btn" onclick="updateThreshold()">[ APPLY THRESHOLD ]</button>
-        <button class="btn-quick" onclick="quickThreshold(50)">50 CM</button>
-        <button class="btn-quick" onclick="quickThreshold(100)">100 CM</button>
-        <button class="btn-quick" onclick="quickThreshold(150)">150 CM</button>
-        <button class="btn-quick" onclick="quickThreshold(200)">200 CM</button>
-        <span id="thresh-status" style="font-size: 11px; color: #888; text-transform: uppercase;"></span>
-      </div>
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>DISTANCE RANGE</th>
+            <th>PROXIMITY STATUS</th>
+            <th>BLINK FREQUENCY</th>
+            <th>INTERVAL</th>
+            <th>PURPOSE</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="num" style="color: #FFF;">&lt; 20 CM</td>
+            <td style="font-weight: 700; color: #FFF;">CRITICAL PROXIMITY</td>
+            <td class="num">ULTRA FAST (10 - 20 Hz)</td>
+            <td class="num">50 - 100 ms</td>
+            <td>Immediate stop warning</td>
+          </tr>
+          <tr>
+            <td class="num">20 CM - 60 CM</td>
+            <td style="font-weight: 700;">CLOSE RANGE</td>
+            <td class="num">FAST BLINK (5 - 8 Hz)</td>
+            <td class="num">120 - 250 ms</td>
+            <td>Approaching obstacle</td>
+          </tr>
+          <tr>
+            <td class="num">60 CM - 150 CM</td>
+            <td style="font-weight: 700;">MID RANGE</td>
+            <td class="num">MODERATE (2 - 3 Hz)</td>
+            <td class="num">300 - 650 ms</td>
+            <td>Normal detection field</td>
+          </tr>
+          <tr>
+            <td class="num">&gt; 150 CM</td>
+            <td style="font-weight: 700;">FAR RANGE</td>
+            <td class="num">SLOW BLINK (&lt; 1 Hz)</td>
+            <td class="num">800 - 1200 ms</td>
+            <td>Distant obstacle detected</td>
+          </tr>
+          <tr>
+            <td class="num" style="color: #666;">OUT OF RANGE</td>
+            <td style="color: #666;">NO OBSTACLE</td>
+            <td class="num" style="color: #666;">OFF</td>
+            <td class="num" style="color: #666;">--</td>
+            <td>Standby / Idle mode</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
-    <!-- SECTION 3: SYSTEM DIAGNOSTICS TABLE -->
+    <!-- SECTION 3: SYSTEM DIAGNOSTICS -->
     <div class="section-title">
-      <span>03 // SYSTEM &amp; HARDWARE DIAGNOSTICS</span>
-      <span>ESP32-S3 TELEMETRY</span>
+      <span>03 // SYSTEM DIAGNOSTICS</span>
+      <span>ESP32-S3 SUPER MINI</span>
     </div>
 
     <div class="table-container">
@@ -569,7 +510,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
             <th>WI-FI RSSI</th>
             <th>SYSTEM UPTIME</th>
             <th>FREE MEMORY</th>
-            <th>PIN CONFIGURATION</th>
+            <th>WIRING PINOUT</th>
           </tr>
         </thead>
         <tbody>
@@ -578,7 +519,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
             <td id="sys-rssi" class="num">-- dBm</td>
             <td id="sys-uptime" class="num">00:00:00</td>
             <td id="sys-heap" class="num">-- KB</td>
-            <td class="num">TRIG: 4 &bull; ECHO: 5 &bull; LED: 7/8</td>
+            <td class="num">TRIG: 4 &bull; ECHO: 5 &bull; LED: 7 &amp; 8</td>
           </tr>
         </tbody>
       </table>
@@ -586,7 +527,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 
     <!-- FOOTER -->
     <footer>
-      <span>ESP32-S3 SUPER MINI &bull; ULTRASONIC TELEMETRY</span>
+      <span>ESP32-S3 SUPER MINI &bull; PROPORTIONAL RADAR BLINK</span>
       <span><a href="/update">[ OVER-THE-AIR FIRMWARE UPDATE ]</a></span>
     </footer>
 
@@ -605,17 +546,17 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
         document.getElementById('conn-badge').className = "badge solid";
         document.getElementById('conn-badge').innerHTML = '<span class="pulse"></span> LIVE COMMS';
 
-        // 1. Distance Readings
+        // 1. Distance Telemetry
         if (data.sensor.valid) {
           document.getElementById('dist-cm').innerText = data.sensor.dist_cm.toFixed(1);
           document.getElementById('dist-in').innerText = data.sensor.dist_in.toFixed(1);
           document.getElementById('dist-m').innerText = data.sensor.dist_m.toFixed(2);
           document.getElementById('pulse-us').innerText = data.sensor.pulse_us;
-          document.getElementById('sensor-health').innerText = "STATUS: ECHO RECEIVED";
+          document.getElementById('sensor-health').innerText = "STATUS: ECHO VALID";
           document.getElementById('sensor-health').style.color = "#FFFFFF";
 
-          // Gauge bar (clamped 0 to 400 cm)
-          const pct = Math.min(100, Math.max(0, (data.sensor.dist_cm / 400.0) * 100));
+          // Range bar gauge (0 to 300 cm)
+          const pct = Math.min(100, Math.max(0, (data.sensor.dist_cm / 300.0) * 100));
           document.getElementById('range-fill').style.width = pct + '%';
         } else {
           document.getElementById('dist-cm').innerText = "--.-";
@@ -627,32 +568,30 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
           document.getElementById('range-fill').style.width = '0%';
         }
 
-        // 2. High Distance Alert & LED State
-        const alertBox = document.getElementById('alert-box');
-        const alertBadge = document.getElementById('alert-badge');
-        const alertStateText = document.getElementById('alert-state-text');
-        const ledIndicator = document.getElementById('led-indicator');
+        // 2. Proximity Zone & Radar Status
+        document.getElementById('radar-zone-text').innerText = data.radar.zone;
+        document.getElementById('zone-badge').innerText = "ZONE: " + data.radar.zone;
 
-        if (data.alert.is_high_distance) {
-          alertBox.className = "alert-banner active-alert";
-          alertBadge.className = "badge solid";
-          alertBadge.innerText = "ALERT: HIGH DISTANCE";
-          alertStateText.innerHTML = '&#9888; HIGH DISTANCE DETECTED (&gt; ' + data.alert.threshold_cm.toFixed(0) + ' CM)';
-          ledIndicator.className = "led-pill on";
-          ledIndicator.innerText = "LED: ON (ALERT)";
+        if (data.sensor.valid) {
+          document.getElementById('blink-freq-text').innerText = "BLINK RATE: " + data.radar.interval_ms + " MS (" + data.radar.rate_desc + ")";
+          document.getElementById('radar-sub-desc').innerText = "DISTANCE " + data.sensor.dist_cm.toFixed(1) + " CM &rarr; " + data.radar.rate_desc + " PULSE";
         } else {
-          alertBox.className = "alert-banner";
-          alertBadge.className = "badge outline";
-          alertBadge.innerText = "STATUS: NORMAL RANGE";
-          alertStateText.innerText = "NORMAL RANGE (&le; " + data.alert.threshold_cm.toFixed(0) + " CM)";
-          ledIndicator.className = "led-pill off";
-          ledIndicator.innerText = "LED: OFF (NORMAL)";
+          document.getElementById('blink-freq-text').innerText = "BLINK RATE: STANDBY (OFF)";
+          document.getElementById('radar-sub-desc').innerText = "NO OBSTACLE DETECTED WITHIN 400 CM";
         }
 
-        // Threshold marker update
-        document.getElementById('thresh-marker').innerText = "TRIGGER: " + data.alert.threshold_cm.toFixed(0) + " CM";
+        // Mirror hardware LED in browser
+        const webLed = document.getElementById('web-led-indicator');
+        const ledText = document.getElementById('led-text-state');
+        if (data.radar.led_state) {
+          webLed.className = "led-strobe-indicator lit";
+          ledText.innerText = "HIGH";
+        } else {
+          webLed.className = "led-strobe-indicator";
+          ledText.innerText = "LOW";
+        }
 
-        // System Diagnostics
+        // 3. System Diagnostics
         document.getElementById('sys-ip').innerText = data.sys.ip;
         document.getElementById('sys-rssi').innerText = data.sys.rssi + " dBm";
         document.getElementById('sys-uptime').innerText = formatUptime(data.sys.uptime_sec);
@@ -667,29 +606,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       }
     }
 
-    async function updateThreshold() {
-      const val = parseFloat(document.getElementById('threshold-input').value);
-      if (isNaN(val) || val < 5 || val > 400) {
-        alert("Please enter a valid threshold between 5 and 400 cm.");
-        return;
-      }
-      try {
-        const res = await fetch('/api/set-threshold?val=' + encodeURIComponent(val));
-        if (res.ok) {
-          document.getElementById('thresh-status').innerText = "[SAVED: " + val + " CM]";
-          setTimeout(() => { document.getElementById('thresh-status').innerText = ""; }, 3000);
-          pollTelemetry();
-        }
-      } catch (e) {
-        alert("Failed to update threshold: " + e.message);
-      }
-    }
-
-    function quickThreshold(val) {
-      document.getElementById('threshold-input').value = val;
-      updateThreshold();
-    }
-
     function formatUptime(totalSecs) {
       const h = Math.floor(totalSecs / 3600).toString().padStart(2, '0');
       const m = Math.floor((totalSecs % 3600) / 60).toString().padStart(2, '0');
@@ -698,7 +614,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     }
 
     pollTelemetry();
-    setInterval(pollTelemetry, 300); // Fast live polling every 300ms
+    setInterval(pollTelemetry, 150); // Fast 150ms polling to track live blink state
   </script>
 </body>
 </html>
@@ -799,46 +715,70 @@ const char OTA_INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 )rawliteral";
 
 /* ====================================================================
- * 6. ULTRASONIC SENSOR MEASUREMENT ROUTINE
+ * 6. ULTRASONIC SENSOR MEASUREMENT & DYNAMIC PROXIMITY BLINK
  * ==================================================================== */
 
 void readUltrasonicSensor() {
-  // Trigger 10-microsecond pulse to HC-SR04
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
 
-  // Measure return echo pulse duration in microseconds (timeout at 25ms ~ 4.2m)
   pulseDurationUs = pulseIn(ECHO_PIN, HIGH, 25000);
 
   if (pulseDurationUs > 0) {
-    // Speed of sound = 343 m/s = 0.0343 cm/us -> Distance = (duration * 0.0343) / 2
     float dist = ((float)pulseDurationUs * 0.0343) / 2.0;
 
-    // HC-SR04 physical valid detection range: 2cm to 400cm
     if (dist >= 2.0 && dist <= 400.0) {
       currentDistanceCm = dist;
       currentDistanceIn = dist / 2.54;
       currentDistanceM  = dist / 100.0;
       isSensorValid     = true;
+
+      // Dynamic Proportional Blink Calculation:
+      // Near (4cm) -> 50ms interval (Very Fast ~10-20 Hz)
+      // Far  (250cm) -> 1000ms interval (Slow ~0.5-1 Hz)
+      float clamped = constrain(currentDistanceCm, 4.0, 250.0);
+      currentBlinkIntervalMs = (unsigned long)map((long)(clamped * 10), 40, 2500, 50, 1000);
+
+      // Categorize Zone for Diagnostics
+      if (currentDistanceCm < 20.0) {
+        proximityZone = "CRITICAL PROXIMITY (FASTEST BLINK)";
+      } else if (currentDistanceCm < 60.0) {
+        proximityZone = "CLOSE RANGE (FAST BLINK)";
+      } else if (currentDistanceCm < 150.0) {
+        proximityZone = "MID RANGE (MODERATE BLINK)";
+      } else {
+        proximityZone = "FAR RANGE (SLOW BLINK)";
+      }
     } else {
-      isSensorValid     = false;
+      isSensorValid = false;
+      proximityZone = "OUT OF RANGE (> 400 CM)";
     }
   } else {
-    isSensorValid       = false;
+    isSensorValid = false;
+    proximityZone = "NO ECHO / STANDBY";
+  }
+}
+
+void updateProximityLedBlink() {
+  if (!isSensorValid) {
+    if (currentLedState) {
+      currentLedState = false;
+      digitalWrite(HIGH_DIST_LED, LOW);
+      digitalWrite(ONBOARD_LED, LOW);
+    }
+    return;
   }
 
-  // Check High Distance Alert Condition
-  if (isSensorValid && (currentDistanceCm > highDistanceThresholdCm)) {
-    isHighDistanceAlert = true;
-    digitalWrite(HIGH_DIST_LED, HIGH); // Turn external LED ON
-    digitalWrite(ONBOARD_LED, HIGH);   // Turn on-board LED ON
-  } else {
-    isHighDistanceAlert = false;
-    digitalWrite(HIGH_DIST_LED, LOW);  // Turn external LED OFF
-    digitalWrite(ONBOARD_LED, LOW);    // Turn on-board LED OFF
+  // Non-blocking proportional blinking
+  unsigned long now = millis();
+  if (now - lastBlinkToggleTime >= currentBlinkIntervalMs) {
+    lastBlinkToggleTime = now;
+    currentLedState = !currentLedState;
+    digitalWrite(HIGH_DIST_LED, currentLedState ? HIGH : LOW);
+    digitalWrite(ONBOARD_LED, currentLedState ? HIGH : LOW);
   }
 }
 
@@ -851,6 +791,19 @@ void handleRoot() {
 }
 
 void handleData() {
+  String rateDesc;
+  if (!isSensorValid) {
+    rateDesc = "OFF";
+  } else if (currentBlinkIntervalMs <= 100) {
+    rateDesc = "VERY FAST";
+  } else if (currentBlinkIntervalMs <= 250) {
+    rateDesc = "FAST";
+  } else if (currentBlinkIntervalMs <= 600) {
+    rateDesc = "MEDIUM";
+  } else {
+    rateDesc = "SLOW";
+  }
+
   String json = "{";
 
   // System Diagnostics
@@ -870,29 +823,17 @@ void handleData() {
   json += "\"pulse_us\":" + String(pulseDurationUs);
   json += "},";
 
-  // Alert & LED State
-  json += "\"alert\":{";
-  json += "\"threshold_cm\":" + String(highDistanceThresholdCm, 1) + ",";
-  json += "\"is_high_distance\":" + String(isHighDistanceAlert ? "true" : "false") + ",";
-  json += "\"led_state\":" + String(isHighDistanceAlert ? "true" : "false");
+  // Proximity Radar & LED Blink State
+  json += "\"radar\":{";
+  json += "\"zone\":\"" + proximityZone + "\",";
+  json += "\"interval_ms\":" + String(isSensorValid ? currentBlinkIntervalMs : 0) + ",";
+  json += "\"rate_desc\":\"" + rateDesc + "\",";
+  json += "\"led_state\":" + String(currentLedState ? "true" : "false");
   json += "}";
 
   json += "}";
 
   server.send(200, "application/json", json);
-}
-
-void handleSetThreshold() {
-  if (server.hasArg("val")) {
-    float newVal = server.arg("val").toFloat();
-    if (newVal >= 5.0 && newVal <= 400.0) {
-      highDistanceThresholdCm = newVal;
-      Serial.printf("[CONFIG] High distance threshold updated to: %.1f cm\n", highDistanceThresholdCm);
-      server.send(200, "text/plain", "OK");
-      return;
-    }
-  }
-  server.send(400, "text/plain", "Invalid threshold value (5 - 400 cm)");
 }
 
 void setupWebOTA() {
@@ -973,12 +914,11 @@ void handleNotFound() {
  * ==================================================================== */
 
 void setup() {
-  // Initialize Serial (ESP32-S3 native USB CDC)
   Serial.begin(115200);
   delay(1000);
 
   Serial.println("\n==============================================");
-  Serial.println("  ESP32-S3 SUPER MINI - ULTRASONIC RADAR");
+  Serial.println("  ESP32-S3 SUPER MINI - PROXIMITY RADAR");
   Serial.println("==============================================");
 
   // Initialize GPIO Pins
@@ -987,7 +927,6 @@ void setup() {
   pinMode(HIGH_DIST_LED, OUTPUT);
   pinMode(ONBOARD_LED, OUTPUT);
 
-  // Ensure initial states
   digitalWrite(TRIG_PIN, LOW);
   digitalWrite(HIGH_DIST_LED, LOW);
   digitalWrite(ONBOARD_LED, LOW);
@@ -1025,13 +964,11 @@ void setup() {
   // Setup HTTP Web Server Routes
   server.on("/", HTTP_GET, handleRoot);
   server.on("/api/data", HTTP_GET, handleData);
-  server.on("/api/set-threshold", HTTP_GET, handleSetThreshold);
   setupWebOTA();
   server.onNotFound(handleNotFound);
   server.begin();
   Serial.println("[HTTP] Web server listening on port 80.");
 
-  // Setup ArduinoOTA for PlatformIO
   setupArduinoOTA();
 }
 
@@ -1045,4 +982,7 @@ void loop() {
     lastMeasureTime = now;
     readUltrasonicSensor();
   }
+
+  // Continuously update LED blinking based on current distance
+  updateProximityLedBlink();
 }
