@@ -19,13 +19,24 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <TinyGPSPlus.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 
 /* ====================================================================
- * 1. WI-FI & OTA CONFIGURATION
+ * 1. WI-FI, SERVER & OTA CONFIGURATION
  * ==================================================================== */
 // Local Wi-Fi router credentials
 const char* WIFI_SSID     = "sakshyam";
 const char* WIFI_PASSWORD = "sakshyam";
+
+// HYDRA Server API Ingest Configuration (from a.md / Section 1 & 2.C)
+// Production Endpoint
+const char* SERVER_API_URL  = "https://zenithkandel.com.np/hydra/backend/api/telemetry/landslide.php";
+// Local Development / Raspberry Pi Fallback (uncomment to use local server)
+// const char* SERVER_API_URL = "http://192.168.1.100/codes/hydra/backend/api/telemetry/landslide.php";
+
+const char* NODE_UID        = "NODE-LANDSLIDE-01";
+const unsigned long TELEMETRY_SEND_INTERVAL_MS = 2000; // Cadence: every 2.0s (1 to 2s per a.md)
 
 // Fallback Access Point (AP) if router is out of range
 const char* AP_SSID       = "ESP32-TELEMETRY";
@@ -62,6 +73,14 @@ bool mpuConnected = false;
 unsigned long lastGpsByteMillis = 0; // Tracks live UART reception from GPS
 unsigned long lastSensorReadTime = 0;
 const unsigned long SENSOR_INTERVAL_MS = 100; // Read IMU at 10 Hz
+
+// Server Telemetry Uplink State
+unsigned long lastServerSendMillis = 0;
+int lastServerHttpCode = 0;
+unsigned long lastServerDurationMs = 0;
+unsigned long serverSuccessCount = 0;
+unsigned long serverFailCount = 0;
+String lastServerResponse = "WAITING FOR FIRST UPLINK";
 
 struct MPUData {
   float ax, ay, az;         // Acceleration in m/s^2
@@ -136,6 +155,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       </div>
       <div class="sys-badges">
         <span id="conn-badge" class="badge solid"><span class="pulse"></span> LIVE COMMS</span>
+        <span id="server-badge" class="badge outline">CLOUD: STANDBY</span>
         <span id="gps-lock-badge" class="badge warn">GPS: CHECKING...</span>
         <span id="mpu-status-badge" class="badge outline">MPU: DETECTING</span>
         <a href="/update" class="badge link">&#9889; WEB OTA REFLASH</a>
@@ -286,7 +306,38 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       </table>
     </div>
 
-    <!-- 3. SYSTEM & OTA DIAGNOSTICS -->
+    <!-- 3. HYDRA CLOUD SERVER INGEST (a.md / Production API) -->
+    <div class="section-title">
+      <span>03 // HYDRA CLOUD SERVER INGEST (PRODUCTION TELEMETRY)</span>
+      <span id="server-updated-tag" style="font-size: 10px; color: #888;">STANDBY</span>
+    </div>
+
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>TARGET API ENDPOINT</th>
+            <th>UPLINK STATUS</th>
+            <th>LATENCY</th>
+            <th>SUCCESS</th>
+            <th>FAIL</th>
+            <th>LAST SERVER RESPONSE</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td id="srv-url" style="color:#FFF; word-break:break-all;">https://zenithkandel.com.np/hydra/backend/api/telemetry/landslide.php</td>
+            <td id="srv-status" class="num">CONNECTING...</td>
+            <td id="srv-latency" class="num">-- ms</td>
+            <td id="srv-ok" class="num">0</td>
+            <td id="srv-fail" class="num">0</td>
+            <td id="srv-resp" style="font-size:11px; color:#AAA; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">WAITING FOR FIRST UPLINK</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 4. SYSTEM & OTA DIAGNOSTICS -->
     <div class="table-container">
       <table>
         <thead>
@@ -467,6 +518,34 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
           document.getElementById('mpu-ax-ms').innerText = "SENSOR DISCONNECTED";
           document.getElementById('mpu-ay-ms').innerText = "CHECK SDA (21)";
           document.getElementById('mpu-az-ms').innerText = "CHECK SCL (22)";
+        }
+
+        // 3. SERVER INGEST STATUS
+        const serverBadge = document.getElementById('server-badge');
+        if (data.server) {
+          document.getElementById('srv-url').innerText = data.server.url;
+          document.getElementById('srv-latency').innerText = data.server.last_latency_ms + ' ms';
+          document.getElementById('srv-ok').innerText = data.server.success_count;
+          document.getElementById('srv-fail').innerText = data.server.fail_count;
+          document.getElementById('srv-resp').innerText = data.server.last_response || '--';
+
+          if (data.server.last_code >= 200 && data.server.last_code < 300) {
+            serverBadge.className = "badge solid";
+            serverBadge.innerHTML = '<span class="pulse"></span> CLOUD: 200 OK';
+            document.getElementById('srv-status').innerHTML = '<span style="color:#FFF;">HTTP ' + data.server.last_code + ' OK</span>';
+            const agoSec = Math.round(data.server.last_send_ago_ms / 100) / 10;
+            document.getElementById('server-updated-tag').innerText = 'SYNCED ' + agoSec + 'S AGO';
+          } else if (data.server.last_code > 0) {
+            serverBadge.className = "badge warn";
+            serverBadge.innerText = 'CLOUD: HTTP ' + data.server.last_code;
+            document.getElementById('srv-status').innerText = 'HTTP ' + data.server.last_code;
+            document.getElementById('server-updated-tag').innerText = 'HTTP WARNING';
+          } else {
+            serverBadge.className = "badge outline";
+            serverBadge.innerText = 'CLOUD: STANDBY';
+            document.getElementById('srv-status').innerText = 'INITIALIZING...';
+            document.getElementById('server-updated-tag').innerText = 'STANDBY';
+          }
         }
 
       } catch (err) {
@@ -652,6 +731,145 @@ void readMPU6050() {
 }
 
 /* ====================================================================
+ * 6.5. HYDRA SERVER TELEMETRY INGEST DISPATCH (HTTP/HTTPS POST)
+ * ==================================================================== */
+
+void sendTelemetryToServer() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  // Drain GPS serial buffer before network request to prevent buffer overflow
+  while (gpsSerial.available() > 0) {
+    char c = gpsSerial.read();
+    gps.encode(c);
+    lastGpsByteMillis = millis();
+  }
+
+  // Hardware status evaluation
+  bool gpsHwAlive = (lastGpsByteMillis > 0 && (millis() - lastGpsByteMillis < 2500));
+  bool hasFix = gps.location.isValid() && (gps.location.age() < 5000);
+  int sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
+
+  String hwStatus;
+  if (!gpsHwAlive) {
+    hwStatus = (gps.charsProcessed() == 0) ? "DEAD / NO DATA RECEIVED" : "COMM TIMEOUT / STALLED";
+  } else {
+    hwStatus = "ALIVE & STREAMING";
+  }
+
+  String fixStage;
+  if (!gpsHwAlive) {
+    fixStage = "OFFLINE";
+  } else if (hasFix) {
+    fixStage = "3D FIX LOCKED (" + String(sats) + " SATS)";
+  } else if (sats == 0) {
+    fixStage = "SEARCHING SATELLITES";
+  } else if (sats < 4) {
+    fixStage = "ACQUIRING FIX";
+  } else {
+    fixStage = "3D FIX LOCKED";
+  }
+
+  // Build JSON Request Body matching a.md Section 2.C exactly
+  String payload = "{";
+  payload += "\"node_uid\":\"" + String(NODE_UID) + "\",";
+  payload += "\"rssi\":" + String(WiFi.RSSI()) + ",";
+
+  // GPS Telemetry Object
+  payload += "\"gps\":{";
+  payload += "\"connected\":" + String(gps.charsProcessed() > 0 ? "true" : "false") + ",";
+  payload += "\"hw_alive\":" + String(gpsHwAlive ? "true" : "false") + ",";
+  payload += "\"hw_status\":\"" + hwStatus + "\",";
+  payload += "\"fix\":" + String(hasFix ? "true" : "false") + ",";
+  payload += "\"fix_stage\":\"" + fixStage + "\",";
+  payload += "\"satellites\":" + String(sats) + ",";
+  payload += "\"lat\":" + String(hasFix ? gps.location.lat() : 0.0, 6) + ",";
+  payload += "\"lng\":" + String(hasFix ? gps.location.lng() : 0.0, 6) + ",";
+  payload += "\"alt_m\":" + String(gps.altitude.isValid() ? gps.altitude.meters() : 0.0, 1) + ",";
+  payload += "\"speed_kmh\":" + String(gps.speed.isValid() ? gps.speed.kmph() : 0.0, 1) + ",";
+  payload += "\"course_deg\":" + String(gps.course.isValid() ? gps.course.deg() : 0.0, 1) + ",";
+  payload += "\"cardinal\":\"" + String(gps.course.isValid() ? TinyGPSPlus::cardinal(gps.course.deg()) : "N") + "\"";
+  payload += "},";
+
+  // MPU-6050 Telemetry Object
+  payload += "\"mpu\":{";
+  payload += "\"connected\":" + String(mpuConnected ? "true" : "false") + ",";
+  payload += "\"pitch\":" + String(mpuConnected ? mpuData.pitch : 0.0, 2) + ",";
+  payload += "\"roll\":" + String(mpuConnected ? mpuData.roll : 0.0, 2) + ",";
+  payload += "\"total_accel_g\":" + String(mpuConnected ? mpuData.total_accel_g : 0.0, 2) + ",";
+  payload += "\"ax\":" + String(mpuConnected ? mpuData.ax : 0.0, 3) + ",";
+  payload += "\"ay\":" + String(mpuConnected ? mpuData.ay : 0.0, 3) + ",";
+  payload += "\"az\":" + String(mpuConnected ? mpuData.az : 0.0, 3) + ",";
+  payload += "\"gx\":" + String(mpuConnected ? mpuData.gx : 0.0, 2) + ",";
+  payload += "\"gy\":" + String(mpuConnected ? mpuData.gy : 0.0, 2) + ",";
+  payload += "\"gz\":" + String(mpuConnected ? mpuData.gz : 0.0, 2) + "";
+  payload += "}";
+
+  payload += "}";
+
+  // HTTP / HTTPS POST Transmission
+  HTTPClient http;
+  http.setTimeout(3000);
+  unsigned long startT = millis();
+  bool isHttps = String(SERVER_API_URL).startsWith("https://");
+  int httpCode = 0;
+
+  if (isHttps) {
+    WiFiClientSecure secureClient;
+    secureClient.setInsecure(); // Skip certificate verification for embedded TLS
+    secureClient.setTimeout(3000);
+    if (http.begin(secureClient, SERVER_API_URL)) {
+      http.addHeader("Content-Type", "application/json");
+      httpCode = http.POST(payload);
+      if (httpCode > 0) {
+        lastServerResponse = http.getString();
+      } else {
+        lastServerResponse = http.errorToString(httpCode);
+      }
+      http.end();
+    }
+  } else {
+    WiFiClient client;
+    client.setTimeout(3000);
+    if (http.begin(client, SERVER_API_URL)) {
+      http.addHeader("Content-Type", "application/json");
+      httpCode = http.POST(payload);
+      if (httpCode > 0) {
+        lastServerResponse = http.getString();
+      } else {
+        lastServerResponse = http.errorToString(httpCode);
+      }
+      http.end();
+    }
+  }
+
+  lastServerDurationMs = millis() - startT;
+  lastServerHttpCode = httpCode;
+
+  if (httpCode >= 200 && httpCode < 300) {
+    serverSuccessCount++;
+    Serial.printf("[SERVER] Telemetry Ingest SUCCESS (HTTP %d, %lums): %s\n",
+                  httpCode, lastServerDurationMs, lastServerResponse.c_str());
+  } else if (httpCode > 0) {
+    serverFailCount++;
+    Serial.printf("[SERVER] Telemetry Ingest WARN (HTTP %d, %lums): %s\n",
+                  httpCode, lastServerDurationMs, lastServerResponse.c_str());
+  } else {
+    serverFailCount++;
+    Serial.printf("[SERVER] Telemetry Ingest FAILED: %s (code %d, %lums)\n",
+                  http.errorToString(httpCode).c_str(), httpCode, lastServerDurationMs);
+  }
+
+  // Drain GPS serial buffer again after network request
+  while (gpsSerial.available() > 0) {
+    char c = gpsSerial.read();
+    gps.encode(c);
+    lastGpsByteMillis = millis();
+  }
+}
+
+/* ====================================================================
  * 7. WEB SERVER HANDLERS & OTA CONTROLLER
  * ==================================================================== */
 
@@ -777,6 +995,21 @@ void handleData() {
     json += "\"gx\":0,\"gy\":0,\"gz\":0,\"gx_rad\":0,\"gy_rad\":0,\"gz_rad\":0,";
     json += "\"temp_c\":0,\"temp_f\":0,\"pitch\":0,\"roll\":0";
   }
+  json += "},";
+
+  // Server Uplink Telemetry Status
+  json += "\"server\":{";
+  json += "\"url\":\"" + String(SERVER_API_URL) + "\",";
+  json += "\"last_code\":" + String(lastServerHttpCode) + ",";
+  json += "\"last_latency_ms\":" + String(lastServerDurationMs) + ",";
+  json += "\"success_count\":" + String(serverSuccessCount) + ",";
+  json += "\"fail_count\":" + String(serverFailCount) + ",";
+  json += "\"last_send_ago_ms\":" + String(lastServerSendMillis > 0 ? (millis() - lastServerSendMillis) : 999999) + ",";
+  String cleanResp = lastServerResponse;
+  cleanResp.replace("\"", "'");
+  cleanResp.replace("\n", " ");
+  cleanResp.replace("\r", " ");
+  json += "\"last_response\":\"" + cleanResp + "\"";
   json += "}";
 
   json += "}";
@@ -911,6 +1144,10 @@ void setup() {
   // Setup Web Server Routes & OTA Services
   server.on("/", HTTP_GET, handleRoot);
   server.on("/api/data", HTTP_GET, handleData);
+  server.on("/api/send_now", HTTP_GET, []() {
+    sendTelemetryToServer();
+    server.send(200, "application/json", "{\"status\":\"TRIGGERED\",\"http_code\":" + String(lastServerHttpCode) + "}");
+  });
   setupWebOTA();
   server.onNotFound(handleNotFound);
   server.begin();
@@ -936,5 +1173,11 @@ void loop() {
   if (now - lastSensorReadTime >= SENSOR_INTERVAL_MS) {
     lastSensorReadTime = now;
     readMPU6050();
+  }
+
+  // Periodic Telemetry Transmission to HYDRA Server API (every 2.0s per a.md)
+  if (now - lastServerSendMillis >= TELEMETRY_SEND_INTERVAL_MS) {
+    lastServerSendMillis = now;
+    sendTelemetryToServer();
   }
 }

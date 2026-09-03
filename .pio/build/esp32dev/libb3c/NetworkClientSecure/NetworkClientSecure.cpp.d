@@ -1,4 +1,6 @@
-.pio/build/esp32dev/src/main.cpp.o: src/main.cpp \
+.pio/build/esp32dev/libb3c/NetworkClientSecure/NetworkClientSecure.cpp.o: \
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/NetworkClientSecure/src/NetworkClientSecure.cpp \
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/NetworkClientSecure/src/NetworkClientSecure.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp_arduino_version.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp8266-compat.h \
@@ -42,11 +44,6 @@
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/USBCDC.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/Esp.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/freertos_stats.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFi.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/Print.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiType.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiSTA.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiGeneric.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/Network/src/Network.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/Network/src/NetworkInterface.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/Printable.h \
@@ -60,40 +57,4 @@
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/Network/src/NetworkUdp.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/Udp.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/cbuf.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiAP.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiScan.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiClient.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiServer.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiUdp.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/Network/src/NetworkUdp.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/WebServer.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/FS/src/FS.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/HTTP_Method.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/Uri.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/middleware/Middleware.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/detail/RequestHandler.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/ESPmDNS/src/ESPmDNS.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/Update/src/Update.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/MD5Builder.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/HashBuilder.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/HEXBuilder.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/ArduinoOTA/src/ArduinoOTA.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/Wire/src/Wire.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-log.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/HardwareI2C.h \
- .pio/libdeps/esp32dev/Adafruit\ MPU6050/Adafruit_MPU6050.h \
- .pio/libdeps/esp32dev/Adafruit\ BusIO/Adafruit_BusIO_Register.h \
- .pio/libdeps/esp32dev/Adafruit\ BusIO/Adafruit_GenericDevice.h \
- .pio/libdeps/esp32dev/Adafruit\ BusIO/Adafruit_I2CDevice.h \
- .pio/libdeps/esp32dev/Adafruit\ BusIO/Adafruit_SPIDevice.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/SPI/src/SPI.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-spi.h \
- .pio/libdeps/esp32dev/Adafruit\ Unified\ Sensor/Adafruit_Sensor.h \
- .pio/libdeps/esp32dev/TinyGPSPlus/src/TinyGPSPlus.h \
- .pio/libdeps/esp32dev/TinyGPSPlus/src/TinyGPS++.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/HTTPClient/src/HTTPClient.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/NetworkClientSecure/src/NetworkClientSecure.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/NetworkClientSecure/src/ssl_client.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/NetworkClientSecure/src/WiFiClientSecure.h \
- C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/NetworkClientSecure/src/NetworkClientSecure.h
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/NetworkClientSecure/src/ssl_client.h
