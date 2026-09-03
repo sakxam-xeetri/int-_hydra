@@ -1,8 +1,16 @@
-# ESP8266 Environmental Telemetry Node (DHT11 + MQ-135) with Live Web UI & OTA
+# Multi-Project Firmware Suite
 
-This project turns an **ESP8266** (NodeMCU or Wemos D1 Mini) into a self-hosted environmental monitor that measures **Temperature, Humidity, Heat Index, and Air Quality (MQ-135 Gas / Smoke / CO2 estimation)**. It serves an auto-refreshing, modern dark-mode web dashboard and features **Dual OTA Updates** (Browser-based Web OTA and Arduino IDE Network OTA).
+## 🖥️ 1. Arduino Nano ESP32 + 3.5" ILI9488 TFT LCD Shield (8-Bit Parallel)
+- **Source Code**: [src/main.cpp](file:///e:/Downloads/HYDRA/src/main.cpp) (PlatformIO) & [Nano_ESP32_ILI9488_Parallel_Web_Display.ino](file:///e:/Downloads/HYDRA/Nano_ESP32_ILI9488_Parallel_Web_Display.ino) (Arduino IDE)
+- **Driver**: Direct 8-bit parallel GPIO bit-banging driver from `example.ino` with auto word-wrapping & live web UI.
+- **Wiring (Nano ESP32 Silk Pins)**:
+  - **Control Pins**: `RD` &rarr; **A0**, `WR` &rarr; **A1**, `RS` &rarr; **A2**, `CS` &rarr; **A3**, `RST` &rarr; **A4**
+  - **Data Bus (D0..D7)**: `D0` &rarr; **D2**, `D1` &rarr; **D3**, `D2` &rarr; **D4**, `D3` &rarr; **D5**, `D4` &rarr; **D6**, `D5` &rarr; **D7**, `D6` &rarr; **D8**, `D7` &rarr; **D9**
+- **Web Dashboard**: Connect to Wi-Fi `sakshyam` / `sakshyam` and open `http://nano-display.local`.
 
 ---
+
+## 🌡️ 2. ESP8266 Environmental Telemetry Node (DHT11 + MQ-135)
 
 ## 📌 Features
 

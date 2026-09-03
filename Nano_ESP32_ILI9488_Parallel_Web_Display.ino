@@ -251,20 +251,17 @@ void setRotation(uint8_t r) {
   currentRotation = r;
   writeCommand(0x36);
   if (r == 1) {
-    // Landscape (480x320)
-    writeDataByte(0x28);
+    writeDataByte(0x28); // Landscape (480x320)
     screenWidth  = 480;
     screenHeight = 320;
   } else {
-    // Portrait (320x480)
-    writeDataByte(0x48);
+    writeDataByte(0x48); // Portrait (320x480)
     screenWidth  = 320;
     screenHeight = 480;
   }
 }
 
 void tftInit() {
-  // Pin modes
   pinMode(TFT_RST, OUTPUT);
   pinMode(TFT_CS, OUTPUT);
   pinMode(TFT_RS, OUTPUT);
@@ -276,7 +273,6 @@ void tftInit() {
   digitalWrite(TFT_RD, HIGH);
   digitalWrite(TFT_WR, HIGH);
 
-  // Hardware Reset sequence from example.ino
   digitalWrite(TFT_RST, HIGH);
   delay(50);
   digitalWrite(TFT_RST, LOW);
@@ -284,12 +280,11 @@ void tftInit() {
   digitalWrite(TFT_RST, HIGH);
   delay(150);
 
-  // ILI9488 Init Commands
-  writeCommand(0x01); delay(150); // Software reset
-  writeCommand(0x11); delay(150); // Sleep OUT
-  writeCommand(0x3A); writeDataByte(0x55); // 16-bit color format (RGB565)
-  setRotation(currentRotation);    // Landscape (0x28) or Portrait (0x48)
-  writeCommand(0x29); delay(50);  // Display ON
+  writeCommand(0x01); delay(150);
+  writeCommand(0x11); delay(150);
+  writeCommand(0x3A); writeDataByte(0x55);
+  setRotation(currentRotation);
+  writeCommand(0x29); delay(50);
 
   Serial.println("[OK] ILI9488 initialized in 8-bit Parallel Mode on Arduino Nano ESP32!");
 }
@@ -330,7 +325,6 @@ void drawTextCentered(int16_t y, const char *text, uint16_t color, uint8_t size)
   drawText(x, y, text, color, size);
 }
 
-// Auto Word-Wrapping Multi-Line Text Renderer
 void drawWrappedText(int16_t x, int16_t y, int16_t maxW, const String& text, uint16_t color, uint8_t size) {
   int16_t curX = x;
   int16_t curY = y;
@@ -414,7 +408,6 @@ void renderDisplay() {
   // 1. TOP HEADER BAR
   fillRect(0, 0, screenWidth, 26, COLOR_PANEL);
   drawHLine(0, 26, screenWidth, COLOR_BORDER);
-
   drawText(10, 8, "NANO ESP32 // ILI9488 [8-BIT PARALLEL]", COLOR_ACCENT, 1);
 
   String ipInfo = "IP: " + (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString());
@@ -434,20 +427,15 @@ void renderDisplay() {
 
   // 3. MAIN CONTENT BASED ON LAYOUT MODE
   if (currentMode == "ALERT") {
-    // High-Contrast Emergency Alert Box
     drawRect(10, 36, screenWidth - 20, screenHeight - 68, COLOR_BORDER);
     drawRect(12, 38, screenWidth - 24, screenHeight - 72, COLOR_BORDER);
-
     fillRect(16, 42, screenWidth - 32, 36, COLOR_BORDER);
     drawTextCentered(52, "! EMERGENCY ALERT NOTICE !", COLOR_BG, 2);
-
     drawWrappedText(24, 96, screenWidth - 48, currentMessage, COLOR_FG, currentFontSize);
 
   } else if (currentMode == "HUD") {
-    // Dual Telemetry Cards
     int cardW = (screenWidth - 30) / 2;
 
-    // Card 1: Network Health
     drawRect(10, 36, cardW, 110, COLOR_BORDER);
     fillRect(12, 38, cardW - 4, 106, COLOR_PANEL);
     drawText(20, 46, "[ WI-FI NETWORK ]", COLOR_ACCENT, 1);
@@ -457,7 +445,6 @@ void renderDisplay() {
     String gwStr = "GATEWAY: " + WiFi.gatewayIP().toString();
     drawText(20, 120, gwStr.c_str(), COLOR_WHITE, 1);
 
-    // Card 2: Memory & Hardware
     drawRect(screenWidth - 10 - cardW, 36, cardW, 110, COLOR_BORDER);
     fillRect(screenWidth - 8 - cardW, 38, cardW - 4, 106, COLOR_PANEL);
     drawText(screenWidth - cardW, 46, "[ NANO ESP32 HEALTH ]", COLOR_ACCENT, 1);
@@ -467,29 +454,22 @@ void renderDisplay() {
     drawText(screenWidth - cardW, 102, cpuStr.c_str(), COLOR_WHITE, 1);
     drawText(screenWidth - cardW, 120, "BUS: 8-BIT PARALLEL", COLOR_WHITE, 1);
 
-    // Lower Message Box
     drawRect(10, 156, screenWidth - 20, screenHeight - 188, COLOR_BORDER);
     fillRect(12, 158, screenWidth - 24, screenHeight - 192, COLOR_PANEL);
     drawText(22, 166, "[ ACTIVE BROADCAST ]", COLOR_ACCENT, 1);
     drawWrappedText(22, 186, screenWidth - 44, currentMessage, COLOR_WHITE, currentFontSize);
 
   } else if (currentMode == "TEXT") {
-    // Pure Terminal Text Stream
     drawText(14, 36, "> SYSTEM TERMINAL STREAM:", COLOR_ACCENT, 1);
     drawHLine(14, 48, screenWidth - 28, COLOR_BORDER);
     drawWrappedText(14, 58, screenWidth - 28, currentMessage, COLOR_FG, currentFontSize);
 
   } else {
-    // Default CARD & BANNER Mode
     drawRect(10, 36, screenWidth - 20, screenHeight - 68, COLOR_BORDER);
     fillRect(12, 38, screenWidth - 24, screenHeight - 72, COLOR_PANEL);
-
-    // Title banner
     fillRect(12, 38, screenWidth - 24, 38, COLOR_BG);
     drawHLine(12, 76, screenWidth - 24, COLOR_BORDER);
     drawText(24, 48, currentTitle.c_str(), COLOR_ACCENT, 2);
-
-    // Body
     drawWrappedText(24, 96, screenWidth - 48, currentMessage, COLOR_WHITE, currentFontSize);
   }
 }
@@ -520,14 +500,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     @keyframes blink { 50% { opacity: 0; } }
     .section-title { font-size: 12px; letter-spacing: 2px; text-transform: uppercase; font-weight: 900; border-left: 4px solid #FFFFFF; padding-left: 8px; margin: 20px 0 10px 0; display: flex; justify-content: space-between; }
     
-    /* PREVIEW */
     .preview-card { border: 2px solid #FFFFFF; background: #080808; padding: 20px; margin-bottom: 16px; }
     .preview-label { font-size: 10px; color: #777; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; margin-bottom: 6px; display: flex; justify-content: space-between; }
     .screen-mock { background: #000000; border: 1px solid #444444; padding: 18px; min-height: 120px; }
     .screen-mock h2 { font-size: 20px; font-weight: 900; letter-spacing: 1px; margin-bottom: 8px; color: #FFFFFF; }
     .screen-mock p { font-size: 14px; color: #CCCCCC; white-space: pre-wrap; word-break: break-word; }
 
-    /* FORM */
     .form-panel { border: 1px solid #FFFFFF; background: #050505; padding: 20px; margin-bottom: 16px; }
     .form-group { margin-bottom: 14px; }
     .form-group label { display: block; font-size: 10px; color: #888888; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; margin-bottom: 6px; }
@@ -546,7 +524,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     .chip { font-size: 9px; background: #111111; border: 1px solid #333333; padding: 6px 10px; cursor: pointer; text-transform: uppercase; font-weight: 700; }
     .chip:hover { border-color: #FFFFFF; }
 
-    /* TABLE */
     .table-container { border: 1px solid #333333; background: #080808; overflow-x: auto; margin-bottom: 16px; }
     table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
     th, td { padding: 10px 14px; border-bottom: 1px solid #222222; border-right: 1px solid #222222; }
