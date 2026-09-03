@@ -4,14 +4,33 @@
 #include <ESP8266HTTPUpdateServer.h>
 #include <ArduinoOTA.h>
 #include <DHT.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h>
 
 /* ====================================================================
  * CONFIGURATION & PIN DEFINITIONS
  * ==================================================================== */
 
 // WiFi Credentials
-const char* ssid     = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
+const char* ssid     = "sakshyam";
+const char* password = "sakshyam";
+
+// HYDRA Production Ingest Endpoint for Fire Node (Node 02) per a.md Section 1 & 2.B
+const char* SERVER_API_URL  = "https://zenithkandel.com.np/hydra/backend/api/telemetry/fire.php";
+// Local Development / Raspberry Pi Fallback (uncomment to use local server)
+// const char* SERVER_API_URL = "http://192.168.1.100/codes/hydra/backend/api/telemetry/fire.php";
+
+const char* NODE_UID        = "NODE-FIRE-01";
+const unsigned long TELEMETRY_SEND_INTERVAL_MS = 2000; // Cadence: every 2.0s per a.md
+
+// Onboard LED Indicator Settings
+#ifndef LED_BUILTIN
+  #define LED_BUILTIN 2 // GPIO 2 (D4 on NodeMCU / Wemos D1 Mini)
+#endif
+#define ONBOARD_LED LED_BUILTIN
+// Note: ESP8266 onboard LED is active-LOW on NodeMCU and ESP-12 boards
+#define LED_ON  LOW
+#define LED_OFF HIGH
 
 // Hostname for mDNS (Access at http://esp8266-air.local)
 const char* hostName = "esp8266-air";
@@ -53,6 +72,14 @@ String airQualityStatus = "Warming up...";
 
 unsigned long lastSensorReadTime = 0;
 const unsigned long sensorReadInterval = 2000; // Read sensors every 2 seconds
+
+// Server Telemetry Uplink State
+unsigned long lastServerSendMillis = 0;
+int lastServerHttpCode = 0;
+unsigned long lastServerDurationMs = 0;
+unsigned long serverSuccessCount = 0;
+unsigned long serverFailCount = 0;
+String lastServerResponse = "WAITING FOR FIRST UPLINK";
 
 /* ====================================================================
  * MQ-135 AIR QUALITY CALCULATION HELPERS
@@ -343,12 +370,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <div class="brand">
       <div class="pulse-dot" id="liveDot"></div>
       <div>
-        <h1>ESP8266 Live Telemetry</h1>
-        <div class="subtitle">DHT11 + MQ-135 Real-Time Sensor Node</div>
+        <h1>ESP8266 Fire &amp; Environmental Node</h1>
+        <p class="subtitle">Real-time Telemetry &bull; DHT11 &bull; MQ-135</p>
       </div>
     </div>
     <div class="header-actions">
-      <a href="/update" class="ota-btn" target="_blank" title="Flash Firmware Wireless">OTA Update</a>
+      <span id="server-badge" class="ota-btn" style="background: rgba(255,255,255,0.1); border: 1px solid var(--card-border); pointer-events: none;">CLOUD: STANDBY</span>
+      <a href="/update" class="ota-btn">&#9889; Web OTA</a>
     </div>
   </header>
 
@@ -415,6 +443,18 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <div class="sys-item">
       <span class="sys-label">ESP8266 IP</span>
       <span class="sys-val" id="sysIp">--</span>
+    </div>
+    <div class="sys-item">
+      <span class="sys-label">Cloud Ingest</span>
+      <span class="sys-val" id="sysServerStatus">STANDBY</span>
+    </div>
+    <div class="sys-item">
+      <span class="sys-label">Server Latency</span>
+      <span class="sys-val" id="sysServerLatency">-- ms</span>
+    </div>
+    <div class="sys-item">
+      <span class="sys-label">Sync Count</span>
+      <span class="sys-val" id="sysServerCounts">0 / 0</span>
     </div>
     <div class="sys-item">
       <span class="sys-label">System Uptime</span>
@@ -486,6 +526,30 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         document.getElementById('sysUptime').innerText = formatUptime(d.uptimeSeconds);
         document.getElementById('sysHeap').innerText = d.freeHeap + ' B';
 
+        // Server Ingest Telemetry
+        if (d.server) {
+          const srvBadge = document.getElementById('server-badge');
+          document.getElementById('sysServerLatency').innerText = d.server.last_latency_ms + ' ms';
+          document.getElementById('sysServerCounts').innerText = d.server.success_count + ' / ' + d.server.fail_count;
+
+          if (d.server.last_code >= 200 && d.server.last_code < 300) {
+            srvBadge.innerText = 'CLOUD: 200 OK';
+            srvBadge.style.background = 'linear-gradient(135deg, #059669, #10b981)';
+            document.getElementById('sysServerStatus').innerText = 'HTTP ' + d.server.last_code + ' OK';
+            document.getElementById('sysServerStatus').style.color = '#10b981';
+          } else if (d.server.last_code > 0) {
+            srvBadge.innerText = 'CLOUD: HTTP ' + d.server.last_code;
+            srvBadge.style.background = 'linear-gradient(135deg, #d97706, #f59e0b)';
+            document.getElementById('sysServerStatus').innerText = 'HTTP ' + d.server.last_code;
+            document.getElementById('sysServerStatus').style.color = '#f59e0b';
+          } else {
+            srvBadge.innerText = 'CLOUD: STANDBY';
+            srvBadge.style.background = 'rgba(255,255,255,0.1)';
+            document.getElementById('sysServerStatus').innerText = 'CONNECTING...';
+            document.getElementById('sysServerStatus').style.color = '#9ca3af';
+          }
+        }
+
         // Keep live pulse active
         document.getElementById('liveDot').style.background = '#10b981';
       } catch (err) {
@@ -512,6 +576,79 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 )rawliteral";
 
 /* ====================================================================
+ * HYDRA CLOUD SERVER TELEMETRY INGEST (HTTP/HTTPS POST)
+ * ==================================================================== */
+void sendTelemetryToServer() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  // Build JSON Payload matching a.md Section 2.B (Node 02 Fire Telemetry)
+  String payload = "{";
+  payload += "\"node_uid\":\"" + String(NODE_UID) + "\",";
+  payload += "\"temperature_c\":" + String(temperatureC, 2) + ",";
+  payload += "\"temperature_f\":" + String(temperatureF, 2) + ",";
+  payload += "\"humidity\":" + String(humidity, 2) + ",";
+  payload += "\"gas_ppm\":" + String(gasPPM, 2) + ",";
+  payload += "\"gas_raw_adc\":" + String(gasRawADC) + ",";
+  payload += "\"air_quality_status\":\"" + airQualityStatus + "\",";
+  payload += "\"rssi\":" + String(WiFi.RSSI());
+  payload += "}";
+
+  WiFiClientSecure secureClient;
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(3000);
+  unsigned long startT = millis();
+  bool isHttps = String(SERVER_API_URL).startsWith("https://");
+  int httpCode = 0;
+
+  if (isHttps) {
+    secureClient.setInsecure(); // Skip certificate verification for embedded client
+    secureClient.setTimeout(3000);
+    if (http.begin(secureClient, SERVER_API_URL)) {
+      http.addHeader("Content-Type", "application/json");
+      httpCode = http.POST(payload);
+      if (httpCode > 0) {
+        lastServerResponse = http.getString();
+      } else {
+        lastServerResponse = http.errorToString(httpCode);
+      }
+      http.end();
+    }
+  } else {
+    client.setTimeout(3000);
+    if (http.begin(client, SERVER_API_URL)) {
+      http.addHeader("Content-Type", "application/json");
+      httpCode = http.POST(payload);
+      if (httpCode > 0) {
+        lastServerResponse = http.getString();
+      } else {
+        lastServerResponse = http.errorToString(httpCode);
+      }
+      http.end();
+    }
+  }
+
+  lastServerDurationMs = millis() - startT;
+  lastServerHttpCode = httpCode;
+
+  if (httpCode >= 200 && httpCode < 300) {
+    serverSuccessCount++;
+    Serial.printf("[SERVER] Fire Telemetry Ingest SUCCESS (HTTP %d, %lums): %s\n",
+                  httpCode, lastServerDurationMs, lastServerResponse.c_str());
+  } else if (httpCode > 0) {
+    serverFailCount++;
+    Serial.printf("[SERVER] Fire Telemetry Ingest WARN (HTTP %d, %lums): %s\n",
+                  httpCode, lastServerDurationMs, lastServerResponse.c_str());
+  } else {
+    serverFailCount++;
+    Serial.printf("[SERVER] Fire Telemetry Ingest FAILED: %s (code %d, %lums)\n",
+                  http.errorToString(httpCode).c_str(), httpCode, lastServerDurationMs);
+  }
+}
+
+/* ====================================================================
  * WEB SERVER HANDLERS
  * ==================================================================== */
 
@@ -534,7 +671,23 @@ void handleData() {
   json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
   json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
   json += "\"uptimeSeconds\":" + String(millis() / 1000) + ",";
-  json += "\"freeHeap\":" + String(ESP.getFreeHeap());
+  json += "\"freeHeap\":" + String(ESP.getFreeHeap()) + ",";
+
+  // Server Uplink Status
+  json += "\"server\":{";
+  json += "\"url\":\"" + String(SERVER_API_URL) + "\",";
+  json += "\"last_code\":" + String(lastServerHttpCode) + ",";
+  json += "\"last_latency_ms\":" + String(lastServerDurationMs) + ",";
+  json += "\"success_count\":" + String(serverSuccessCount) + ",";
+  json += "\"fail_count\":" + String(serverFailCount) + ",";
+  json += "\"last_send_ago_ms\":" + String(lastServerSendMillis > 0 ? (millis() - lastServerSendMillis) : 999999) + ",";
+  String cleanResp = lastServerResponse;
+  cleanResp.replace("\"", "'");
+  cleanResp.replace("\n", " ");
+  cleanResp.replace("\r", " ");
+  json += "\"last_response\":\"" + cleanResp + "\"";
+  json += "}";
+
   json += "}";
 
   server.send(200, "application/json", json);
@@ -558,23 +711,32 @@ void setup() {
   dht.begin();
   pinMode(MQ135_PIN, INPUT);
 
+  // Initialize Onboard LED (blinks during connection, glows solid when connected)
+  pinMode(ONBOARD_LED, OUTPUT);
+  digitalWrite(ONBOARD_LED, LED_OFF);
+
   // Connect to WiFi
   Serial.printf("Connecting to %s ", ssid);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
   int attempt = 0;
+  bool blinkState = false;
   while (WiFi.status() != WL_CONNECTED && attempt < 30) {
     delay(500);
+    blinkState = !blinkState;
+    digitalWrite(ONBOARD_LED, blinkState ? LED_ON : LED_OFF);
     Serial.print(".");
     attempt++;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(ONBOARD_LED, LED_ON); // Solid ON when Wi-Fi is connected
     Serial.println("\nWiFi Connected!");
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
   } else {
+    digitalWrite(ONBOARD_LED, LED_OFF);
     Serial.println("\nWiFi Failed to connect. Starting in Fallback Mode.");
   }
 
@@ -585,13 +747,11 @@ void setup() {
   }
 
   // 1. Setup Web OTA updater (/update endpoint)
-  // You can flash .bin firmware directly from your browser!
   httpUpdater.setup(&server, "/update", otaUsername, otaPassword);
   Serial.println("Web OTA active at: http://<IP>/update");
 
   // 2. Setup ArduinoOTA (for IDE direct wireless flashing)
   ArduinoOTA.setHostname(hostName);
-  // ArduinoOTA.setPassword("admin"); // Optional password
 
   ArduinoOTA.onStart([]() {
     String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
@@ -617,6 +777,10 @@ void setup() {
   // Configure Web Server Routes
   server.on("/", HTTP_GET, handleRoot);
   server.on("/data", HTTP_GET, handleData);
+  server.on("/send_now", HTTP_GET, []() {
+    sendTelemetryToServer();
+    server.send(200, "application/json", "{\"status\":\"TRIGGERED\",\"http_code\":" + String(lastServerHttpCode) + "}");
+  });
   server.onNotFound(handleNotFound);
 
   server.begin();
@@ -630,6 +794,13 @@ void setup() {
  * MAIN LOOP
  * ==================================================================== */
 void loop() {
+  // Onboard LED Wi-Fi Status Indicator: Glows SOLID when Wi-Fi is connected
+  if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(ONBOARD_LED, LED_ON); // Solid ON when Wi-Fi is connected (active-LOW)
+  } else {
+    digitalWrite(ONBOARD_LED, (millis() % 1000 < 150) ? LED_ON : LED_OFF); // Short pulse if disconnected
+  }
+
   // Handle OTA routines
   ArduinoOTA.handle();
 
@@ -644,5 +815,11 @@ void loop() {
   if (currentMillis - lastSensorReadTime >= sensorReadInterval) {
     lastSensorReadTime = currentMillis;
     readSensors();
+  }
+
+  // Periodic Telemetry Transmission to HYDRA Server API (every 2.0s per a.md)
+  if (currentMillis - lastServerSendMillis >= TELEMETRY_SEND_INTERVAL_MS) {
+    lastServerSendMillis = currentMillis;
+    sendTelemetryToServer();
   }
 }

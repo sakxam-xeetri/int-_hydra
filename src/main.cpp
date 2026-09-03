@@ -1,76 +1,77 @@
-/* ====================================================================
- * ESP32-S3 SUPER MINI - ULTRASONIC RADAR & PROXIMITY BLINK SENSOR
- * Hardware : ESP32-S3 Super Mini + HC-SR04 Ultrasonic Sensor + Alert LED
- * Wi-Fi    : SSID "sakshyam" | Password "sakshyam"
- * UI Theme : Stark High-Contrast Monochrome (Black & White, 0px Radius)
- * Feature  : Proximity Radar (Fast Blink = Near, Slow Blink = Far)
- * ==================================================================== */
-
-#include <Arduino.h>
-#include <WiFi.h>
-#include <WebServer.h>
-#include <ESPmDNS.h>
-#include <Update.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <ESP8266mDNS.h>
+#include <ESP8266HTTPUpdateServer.h>
 #include <ArduinoOTA.h>
-#include <HTTPClient.h>
+#include <DHT.h>
+#include <ESP8266HTTPClient.h>
 #include <WiFiClientSecure.h>
 
 /* ====================================================================
- * 1. WI-FI, SERVER & OTA CONFIGURATION
+ * CONFIGURATION & PIN DEFINITIONS
  * ==================================================================== */
-const char* WIFI_SSID     = "sakshyam";
-const char* WIFI_PASSWORD = "sakshyam";
 
-// HYDRA Production Ingest Endpoint for Flood Node (Node 01) per a.md Section 1 & 2.A
-const char* SERVER_API_URL  = "https://zenithkandel.com.np/hydra/backend/api/telemetry/flood.php";
+// WiFi Credentials
+const char* ssid     = "sakshyam";
+const char* password = "sakshyam";
+
+// HYDRA Production Ingest Endpoint for Fire Node (Node 02) per a.md Section 1 & 2.B
+const char* SERVER_API_URL  = "https://zenithkandel.com.np/hydra/backend/api/telemetry/fire.php";
 // Local Development / Raspberry Pi Fallback (uncomment to use local server)
-// const char* SERVER_API_URL = "http://192.168.1.100/codes/hydra/backend/api/telemetry/flood.php";
+// const char* SERVER_API_URL = "http://192.168.1.100/codes/hydra/backend/api/telemetry/fire.php";
 
-const char* NODE_UID        = "NODE-FLOOD-01";
-const unsigned long TELEMETRY_SEND_INTERVAL_MS = 2000; // Cadence: every 2.0s (1 to 3s per a.md)
+const char* NODE_UID        = "NODE-FIRE-01";
+const unsigned long TELEMETRY_SEND_INTERVAL_MS = 2000; // Cadence: every 2.0s per a.md
 
-// Fallback Access Point (AP) if router is out of range
-const char* AP_SSID       = "ESP32S3-DISTANCE";
-const char* AP_PASSWORD   = "12345678";
+// Onboard LED Indicator Settings
+#ifndef LED_BUILTIN
+  #define LED_BUILTIN 2 // GPIO 2 (D4 on NodeMCU / Wemos D1 Mini)
+#endif
+#define ONBOARD_LED LED_BUILTIN
+// Note: ESP8266 onboard LED is active-LOW on NodeMCU and ESP-12 boards
+#define LED_ON  LOW
+#define LED_OFF HIGH
 
-// mDNS Hostname (Access via http://esp32s3-distance.local)
-const char* MDNS_HOSTNAME = "esp32s3-distance";
+// Hostname for mDNS (Access at http://esp8266-air.local)
+const char* hostName = "esp8266-air";
 
-// OTA Credentials (used at /update)
-const char* otaUsername   = "admin";
-const char* otaPassword   = "admin";
+// Web OTA credentials (used at http://<ip>/update)
+const char* otaUsername = "admin";
+const char* otaPassword = "admin";
+
+// DHT11 Sensor Settings
+#define DHTPIN  D2       // GPIO4 on ESP8266
+#define DHTTYPE DHT11    // DHT 11
+DHT dht(DHTPIN, DHTTYPE);
+
+// MQ-135 Gas Sensor Settings
+#define MQ135_PIN A0     // ADC0 (Analog Pin on ESP8266)
+
+// MQ-135 Calculation Parameters
+// Standard load resistance (RL) is typically 10K to 20K on commercial break-out boards.
+// Ro is the sensor resistance in clean fresh air.
+// For initial estimation, Ro is calibrated to ~10.0k - 20.0k.
+const float R_LOAD = 10.0;     // Load resistance in Kilo-Ohms
+const float R0_CLEAN_AIR = 10.0; // Clean air baseline Ro in Kilo-Ohms (adjust after warm-up)
 
 /* ====================================================================
- * 2. PIN DEFINITIONS (ESP32-S3 SUPER MINI)
+ * GLOBAL VARIABLES & WEB SERVER
  * ==================================================================== */
-// Ultrasonic Sensor (HC-SR04 / HC-SR04P / JSN-SR04T)
-#define TRIG_PIN         4  // GPIO 4 -> Ultrasonic TRIGGER pin
-#define ECHO_PIN         5  // GPIO 5 -> Ultrasonic ECHO pin
+ESP8266WebServer server(80);
+ESP8266HTTPUpdateServer httpUpdater;
 
-// LED Indicators
-#define HIGH_DIST_LED    7  // GPIO 7 -> External Indicator LED (Anode via 220Ω resistor)
-#define ONBOARD_LED      8  // GPIO 8 -> On-Board Blue LED on ESP32-S3 Super Mini
+// Sensor reading cache
+float temperatureC = 0.0;
+float temperatureF = 0.0;
+float humidity = 0.0;
+float heatIndexC = 0.0;
+int   gasRawADC = 0;
+float gasVoltage = 0.0;
+float gasPPM = 0.0;
+String airQualityStatus = "Warming up...";
 
-/* ====================================================================
- * 3. GLOBAL VARIABLES & STATE
- * ==================================================================== */
-WebServer server(80);
-
-// Sensor readings
-float currentDistanceCm = 0.0;
-float currentDistanceIn = 0.0;
-float currentDistanceM  = 0.0;
-unsigned long pulseDurationUs = 0;
-bool isSensorValid = false;
-
-// Dynamic Proximity Blink State
-unsigned long currentBlinkIntervalMs = 1000;
-unsigned long lastBlinkToggleTime = 0;
-bool currentLedState = false;
-String proximityZone = "OUT OF RANGE";
-
-unsigned long lastMeasureTime = 0;
-const unsigned long MEASURE_INTERVAL_MS = 60; // Measure distance at ~16 Hz for responsive radar
+unsigned long lastSensorReadTime = 0;
+const unsigned long sensorReadInterval = 2000; // Read sensors every 2 seconds
 
 // Server Telemetry Uplink State
 unsigned long lastServerSendMillis = 0;
@@ -81,803 +82,521 @@ unsigned long serverFailCount = 0;
 String lastServerResponse = "WAITING FOR FIRST UPLINK";
 
 /* ====================================================================
- * 4. EMBEDDED SHARP MONOCHROME WEB DASHBOARD HTML
+ * MQ-135 AIR QUALITY CALCULATION HELPERS
  * ==================================================================== */
-const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
+// Corrected resistance calculation considering temperature and humidity
+// (MQ-135 datasheet specifies sensitivity variation with T and RH)
+float getMQ135CorrectionFactor(float t, float h) {
+  // Approximate MQ-135 atmospheric correction factor curve
+  return (0.00035 * t * t) - (0.02718 * t) + 1.395 - (0.0018 * (h - 33.0));
+}
+
+void readSensors() {
+  // 1. Read DHT11
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+
+  if (!isnan(h) && !isnan(t)) {
+    humidity = h;
+    temperatureC = t;
+    temperatureF = (t * 1.8) + 32.0;
+    heatIndexC = dht.computeHeatIndex(t, h, false);
+  }
+
+  // 2. Read MQ-135
+  // Over-sample for ADC stability
+  long adcSum = 0;
+  for (int i = 0; i < 10; i++) {
+    adcSum += analogRead(MQ135_PIN);
+    delay(5);
+  }
+  gasRawADC = adcSum / 10;
+
+  // NodeMCU A0 divider maps 0-3.3V to 0-1023 (or 0-1.0V for bare ESP-12)
+  // Assuming standard NodeMCU/Wemos D1 with built-in divider:
+  gasVoltage = ((float)gasRawADC / 1023.0) * 3.3;
+
+  // Sensor resistance (Rs) calculation:
+  // VRL = gasVoltage. If VRL <= 0, prevent division by zero.
+  if (gasVoltage > 0.05 && gasVoltage < 3.25) {
+    float rs = ((3.3 - gasVoltage) / gasVoltage) * R_LOAD;
+    
+    // Apply DHT temperature & humidity compensation if valid
+    float corrFactor = (!isnan(h) && !isnan(t)) ? getMQ135CorrectionFactor(t, h) : 1.0;
+    float rsCompensated = rs / corrFactor;
+
+    // Ratio Rs/Ro
+    float ratio = rsCompensated / R0_CLEAN_AIR;
+
+    // MQ-135 curve approximation for general air pollution (CO2/smoke/NH3):
+    // PPM = A * (ratio)^B (typical MQ-135 general curve: A ≈ 116.6, B ≈ -2.76)
+    if (ratio > 0.1) {
+      gasPPM = 116.6020682 * pow(ratio, -2.769034857);
+    } else {
+      gasPPM = 9999.0;
+    }
+  } else if (gasVoltage <= 0.05) {
+    gasPPM = 0.0;
+  }
+
+  // Determine Air Quality Status
+  if (millis() < 60000) { // MQ-135 requires initial pre-heat time
+    airQualityStatus = "Sensor Preheating (1-3 min)";
+  } else if (gasRawADC < 200 || gasPPM < 450) {
+    airQualityStatus = "Excellent / Fresh Air";
+  } else if (gasRawADC < 400 || gasPPM < 800) {
+    airQualityStatus = "Good (Normal Indoor)";
+  } else if (gasRawADC < 600 || gasPPM < 1200) {
+    airQualityStatus = "Moderate / Ventilate";
+  } else if (gasRawADC < 800 || gasPPM < 1800) {
+    airQualityStatus = "Poor (Stale / Gaseous)";
+  } else {
+    airQualityStatus = "Hazardous / High Contaminants!";
+  }
+}
+
+/* ====================================================================
+ * HTML / CSS / JS WEB INTERFACE (Stored in Flash Memory via PROGMEM)
+ * ==================================================================== */
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ESP32-S3 // PROXIMITY RADAR</title>
+  <title>ESP8266 Environmental Monitor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      border-radius: 0 !important; /* STRICT ZERO-RADIUS SHARP EDGES */
+    :root {
+      --bg: #0b0f19;
+      --card-bg: rgba(23, 32, 54, 0.7);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --text-main: #f3f4f6;
+      --text-sub: #9ca3af;
+      --accent-temp: #f97316;
+      --accent-hum: #06b6d4;
+      --accent-gas: #10b981;
+      --accent-ota: #8b5cf6;
+      --glow-temp: rgba(249, 115, 22, 0.25);
+      --glow-hum: rgba(6, 182, 212, 0.25);
+      --glow-gas: rgba(16, 185, 129, 0.25);
     }
-
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      background-color: #000000;
-      color: #FFFFFF;
-      font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, "Courier New", monospace;
-      padding: 16px;
-      line-height: 1.35;
-      -webkit-font-smoothing: antialiased;
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: radial-gradient(circle at top, #141e33 0%, var(--bg) 100%);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1.5rem 1rem 3rem;
     }
-
-    .container {
-      max-width: 960px;
-      margin: 0 auto;
-    }
-
-    /* HEADER */
     header {
-      border: 1px solid #FFFFFF;
-      padding: 16px;
-      margin-bottom: 16px;
-      background: #050505;
+      width: 100%;
+      max-width: 960px;
       display: flex;
-      flex-wrap: wrap;
       justify-content: space-between;
       align-items: center;
-      gap: 12px;
+      margin-bottom: 2rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--card-border);
     }
-
-    .title-group h1 {
-      font-size: 17px;
-      letter-spacing: 2px;
-      font-weight: 900;
-      text-transform: uppercase;
-    }
-
-    .title-group p {
-      font-size: 11px;
-      color: #888888;
-      letter-spacing: 1px;
-      margin-top: 3px;
-    }
-
-    .badges {
+    .brand {
       display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .pulse-dot {
+      width: 12px;
+      height: 12px;
+      background: #10b981;
+      border-radius: 50%;
+      box-shadow: 0 0 12px #10b981;
+      animation: pulse 2s infinite ease-in-out;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.3); opacity: 0.7; }
+    }
+    h1 { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.5px; }
+    .subtitle { font-size: 0.82rem; color: var(--text-sub); }
+
+    .header-actions {
+      display: flex;
+      gap: 0.6rem;
       align-items: center;
     }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 8px;
-      font-size: 11px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      border: 1px solid #FFFFFF;
+    .ota-btn {
+      background: linear-gradient(135deg, #7c3aed, #6366f1);
+      color: #fff;
       text-decoration: none;
+      font-size: 0.85rem;
+      font-weight: 600;
+      padding: 0.5rem 1rem;
+      border-radius: 9999px;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+    }
+    .ota-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(99, 102, 241, 0.45);
     }
 
-    .badge.solid { background: #FFFFFF; color: #000000; }
-    .badge.outline { background: #000000; color: #FFFFFF; }
-    .badge.warn { border-style: dashed; background: #1A1A1A; color: #FFFFFF; }
-    .badge.link { background: #000000; color: #FFFFFF; cursor: pointer; }
-    .badge.link:hover { background: #FFFFFF; color: #000000; }
-
-    .pulse {
-      display: inline-block;
-      width: 8px;
-      height: 8px;
-      background: #000000;
-      animation: blink 1s steps(1) infinite;
-    }
-
-    @keyframes blink { 50% { opacity: 0; } }
-
-    /* SECTION TITLES */
-    .section-title {
-      font-size: 12px;
-      letter-spacing: 2px;
-      text-transform: uppercase;
-      font-weight: 900;
-      border-left: 4px solid #FFFFFF;
-      padding-left: 8px;
-      margin: 20px 0 10px 0;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    /* BIG HERO DISTANCE CARD */
-    .hero-card {
-      border: 2px solid #FFFFFF;
-      background: #080808;
-      padding: 24px;
-      margin-bottom: 16px;
-    }
-
-    .hero-label {
-      font-size: 11px;
-      color: #888888;
-      text-transform: uppercase;
-      letter-spacing: 2px;
-      font-weight: 800;
-      display: flex;
-      justify-content: space-between;
-      margin-bottom: 12px;
-    }
-
-    .hero-value-wrap {
-      display: flex;
-      align-items: baseline;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-
-    .hero-value {
-      font-size: 68px;
-      font-weight: 900;
-      letter-spacing: -1px;
-      line-height: 1;
-      color: #FFFFFF;
-    }
-
-    .hero-unit {
-      font-size: 24px;
-      font-weight: 700;
-      letter-spacing: 1px;
-      color: #AAAAAA;
-    }
-
-    .hero-sub {
-      margin-top: 14px;
-      font-size: 13px;
-      color: #999999;
-      letter-spacing: 1px;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 16px;
-    }
-
-    .hero-sub span {
-      font-weight: 700;
-      color: #FFFFFF;
-    }
-
-    /* RADAR BLINK MONITOR CARD */
-    .radar-banner {
-      border: 2px solid #FFFFFF;
-      padding: 16px 20px;
-      margin-bottom: 16px;
-      background: #0D0D0D;
+    .dashboard-grid {
+      width: 100%;
+      max-width: 960px;
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 16px;
-      align-items: center;
+      gap: 1.25rem;
+      margin-bottom: 2rem;
     }
-
-    .radar-zone-title {
-      font-size: 10px;
-      color: #888888;
-      text-transform: uppercase;
-      letter-spacing: 1.5px;
-      margin-bottom: 4px;
-    }
-
-    .radar-zone-val {
-      font-size: 20px;
-      font-weight: 900;
-      letter-spacing: 1px;
-      text-transform: uppercase;
-    }
-
-    .led-hardware-box {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      border: 1px solid #333333;
-      padding: 10px 14px;
-      background: #000000;
-    }
-
-    .led-strobe-indicator {
-      display: inline-block;
-      width: 14px;
-      height: 14px;
-      background: #222222;
-      border: 1px solid #FFFFFF;
-      transition: background 0.05s ease;
-    }
-
-    .led-strobe-indicator.lit {
-      background: #FFFFFF;
-      box-shadow: 0 0 10px #FFFFFF;
-    }
-
-    /* RANGE GAUGE BAR */
-    .bar-container {
-      margin: 16px 0 6px 0;
-      position: relative;
-    }
-
-    .bar-track {
-      height: 16px;
-      background: #111111;
-      border: 1px solid #444444;
+    .card {
+      background: var(--card-bg);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border: 1px solid var(--card-border);
+      border-radius: 1.25rem;
+      padding: 1.5rem;
+      transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
       position: relative;
       overflow: hidden;
     }
-
-    .bar-fill {
-      height: 100%;
-      background: #FFFFFF;
-      width: 0%;
-      transition: width 0.08s linear;
+    .card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(255, 255, 255, 0.15);
     }
+    .card-temp { box-shadow: 0 8px 30px var(--glow-temp); }
+    .card-hum  { box-shadow: 0 8px 30px var(--glow-hum); }
+    .card-gas  { box-shadow: 0 8px 30px var(--glow-gas); }
 
-    .bar-scale {
+    .card-header {
       display: flex;
       justify-content: space-between;
-      font-size: 10px;
-      color: #666666;
-      margin-top: 4px;
-      letter-spacing: 1px;
+      align-items: center;
+      margin-bottom: 1rem;
     }
-
-    /* EXPLANATION MATRIX */
-    .table-container {
-      border: 1px solid #333333;
-      background: #080808;
-      overflow-x: auto;
-      margin-bottom: 16px;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 12px;
-      text-align: left;
-    }
-
-    th, td {
-      padding: 10px 14px;
-      border-bottom: 1px solid #222222;
-      border-right: 1px solid #222222;
-    }
-
-    th:last-child, td:last-child { border-right: none; }
-    tr:last-child td { border-bottom: none; }
-
-    th {
-      background: #111111;
-      color: #888888;
-      font-size: 10px;
+    .card-title {
+      font-size: 0.85rem;
+      font-weight: 600;
       text-transform: uppercase;
-      letter-spacing: 1px;
-      font-weight: 700;
+      letter-spacing: 0.05em;
+      color: var(--text-sub);
+    }
+    .card-icon {
+      font-size: 1.4rem;
     }
 
-    td.num {
-      font-weight: 700;
-      color: #FFFFFF;
-      font-size: 13px;
+    .card-value-wrap {
+      display: flex;
+      align-items: baseline;
+      gap: 0.35rem;
+      margin-bottom: 0.75rem;
     }
+    .card-value {
+      font-size: 2.8rem;
+      font-weight: 700;
+      line-height: 1;
+      letter-spacing: -1px;
+    }
+    .card-unit {
+      font-size: 1.2rem;
+      color: var(--text-sub);
+      font-weight: 500;
+    }
+
+    .meta-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.8rem;
+      color: var(--text-sub);
+      padding-top: 0.75rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.25rem 0.65rem;
+      border-radius: 9999px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    /* Gas Quality Badge Styling */
+    .badge-excellent { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .badge-good      { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
+    .badge-moderate  { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+    .badge-poor      { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+    .badge-hazard    { background: rgba(225, 29, 72, 0.3); color: #fb7185; animation: blink 1.2s infinite; }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    /* System Info Bar */
+    .system-bar {
+      width: 100%;
+      max-width: 960px;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--card-border);
+      border-radius: 1rem;
+      padding: 1rem 1.25rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1.5rem;
+      justify-content: space-around;
+      font-size: 0.85rem;
+      color: var(--text-sub);
+    }
+    .sys-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.25rem;
+    }
+    .sys-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .sys-val { font-weight: 600; color: var(--text-main); }
 
     footer {
-      border-top: 1px solid #333333;
-      padding: 14px 0;
-      font-size: 10px;
-      color: #666666;
-      display: flex;
-      justify-content: space-between;
-      letter-spacing: 1px;
-      text-transform: uppercase;
-      flex-wrap: wrap;
-      gap: 8px;
+      margin-top: 2rem;
+      font-size: 0.75rem;
+      color: #6b7280;
+      text-align: center;
     }
-
-    footer a { color: #FFFFFF; text-decoration: none; border-bottom: 1px solid #FFFFFF; }
-    footer a:hover { background: #FFFFFF; color: #000000; }
   </style>
 </head>
 <body>
-  <div class="container">
-    
-    <!-- HEADER -->
-    <header>
-      <div class="title-group">
-        <h1>ESP32-S3 // PROXIMITY RADAR</h1>
-        <p>SUPER MINI BOARD &bull; PROPORTIONAL BLINK (FAST = NEAR, SLOW = FAR)</p>
-      </div>
-      <div class="badges">
-        <span id="conn-badge" class="badge solid"><span class="pulse"></span> LIVE COMMS</span>
-        <span id="server-badge" class="badge outline">CLOUD: STANDBY</span>
-        <span id="zone-badge" class="badge outline">RADAR: ACTIVE</span>
-        <a href="/update" class="badge link">&#9889; WEB OTA</a>
-      </div>
-    </header>
 
-    <!-- SECTION 1: LIVE DISTANCE TELEMETRY -->
-    <div class="section-title">
-      <span>01 // REAL-TIME DISTANCE MEASUREMENT</span>
-      <span style="font-size: 10px; color: #888;">SAMPLING @ 16 HZ</span>
-    </div>
-
-    <!-- HERO DISTANCE DISPLAY -->
-    <div class="hero-card">
-      <div class="hero-label">
-        <span>MEASURED DISTANCE (HC-SR04)</span>
-        <span id="sensor-health">STATUS: ECHO VALID</span>
-      </div>
-      
-      <div class="hero-value-wrap">
-        <div class="hero-value" id="dist-cm">--.-</div>
-        <div class="hero-unit">CENTIMETERS</div>
-      </div>
-
-      <!-- VISUAL RANGE BAR GAUGE (0 - 300 CM) -->
-      <div class="bar-container">
-        <div class="bar-track">
-          <div id="range-fill" class="bar-fill"></div>
-        </div>
-        <div class="bar-scale">
-          <span style="color:#FFF;">0 CM (FAST BLINK)</span>
-          <span>150 CM (MEDIUM BLINK)</span>
-          <span>300 CM (SLOW BLINK)</span>
-        </div>
-      </div>
-
-      <div class="hero-sub">
-        <div>INCHES: <span id="dist-in">--.-</span> IN</div>
-        <div>METERS: <span id="dist-m">--.--</span> M</div>
-        <div>TIME OF FLIGHT: <span id="pulse-us">--</span> &mu;S</div>
-      </div>
-    </div>
-
-    <!-- PROXIMITY RADAR & LED BLINK MONITOR -->
-    <div class="radar-banner">
+  <header>
+    <div class="brand">
+      <div class="pulse-dot" id="liveDot"></div>
       <div>
-        <div class="radar-zone-title">01. PROXIMITY RADAR ZONE:</div>
-        <div id="radar-zone-text" class="radar-zone-val">DETECTING...</div>
-        <div id="radar-sub-desc" style="font-size: 11px; color: #888; margin-top: 4px;">
-          PROPORTIONAL PULSE FREQUENCY
-        </div>
-      </div>
-
-      <div class="led-hardware-box">
-        <div>
-          <div style="font-size: 10px; color: #888; text-transform: uppercase;">PHYSICAL LED (GPIO 7 &amp; 8):</div>
-          <div id="blink-freq-text" style="font-size: 14px; font-weight: 800; color: #FFF; margin-top: 2px;">
-            INTERVAL: -- MS
-          </div>
-        </div>
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <span id="led-text-state" style="font-size: 11px; font-weight: 800;">SYNC</span>
-          <div id="web-led-indicator" class="led-strobe-indicator"></div>
-        </div>
+        <h1>ESP8266 Fire &amp; Environmental Node</h1>
+        <p class="subtitle">Real-time Telemetry &bull; DHT11 &bull; MQ-135</p>
       </div>
     </div>
+    <div class="header-actions">
+      <span id="server-badge" class="ota-btn" style="background: rgba(255,255,255,0.1); border: 1px solid var(--card-border); pointer-events: none;">CLOUD: STANDBY</span>
+      <a href="/update" class="ota-btn">&#9889; Web OTA</a>
+    </div>
+  </header>
 
-    <!-- SECTION 2: BLINK RATE MAPPING TABLE -->
-    <div class="section-title">
-      <span>02 // PROXIMITY BLINK FREQUENCY MAPPING</span>
-      <span>AUTOMATIC HARDWARE CONTROL</span>
+  <div class="dashboard-grid">
+    <!-- Temperature Card -->
+    <div class="card card-temp">
+      <div class="card-header">
+        <span class="card-title">Temperature (DHT11)</span>
+        <span class="card-icon">&#127777;&#65039;</span>
+      </div>
+      <div class="card-value-wrap">
+        <span class="card-value" id="valTemp">--</span>
+        <span class="card-unit">&deg;C</span>
+      </div>
+      <div class="meta-row">
+        <span>Fahrenheit: <strong id="valTempF">-- &deg;F</strong></span>
+        <span>Heat Index: <strong id="valHeatIndex">-- &deg;C</strong></span>
+      </div>
     </div>
 
-    <div class="table-container">
-      <table>
-        <thead>
-          <tr>
-            <th>DISTANCE RANGE</th>
-            <th>PROXIMITY STATUS</th>
-            <th>BLINK FREQUENCY</th>
-            <th>INTERVAL</th>
-            <th>PURPOSE</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td class="num" style="color: #FFF;">&lt; 20 CM</td>
-            <td style="font-weight: 700; color: #FFF;">CRITICAL PROXIMITY</td>
-            <td class="num">ULTRA FAST (10 - 20 Hz)</td>
-            <td class="num">50 - 100 ms</td>
-            <td>Immediate stop warning</td>
-          </tr>
-          <tr>
-            <td class="num">20 CM - 60 CM</td>
-            <td style="font-weight: 700;">CLOSE RANGE</td>
-            <td class="num">FAST BLINK (5 - 8 Hz)</td>
-            <td class="num">120 - 250 ms</td>
-            <td>Approaching obstacle</td>
-          </tr>
-          <tr>
-            <td class="num">60 CM - 150 CM</td>
-            <td style="font-weight: 700;">MID RANGE</td>
-            <td class="num">MODERATE (2 - 3 Hz)</td>
-            <td class="num">300 - 650 ms</td>
-            <td>Normal detection field</td>
-          </tr>
-          <tr>
-            <td class="num">&gt; 150 CM</td>
-            <td style="font-weight: 700;">FAR RANGE</td>
-            <td class="num">SLOW BLINK (&lt; 1 Hz)</td>
-            <td class="num">800 - 1200 ms</td>
-            <td>Distant obstacle detected</td>
-          </tr>
-          <tr>
-            <td class="num" style="color: #666;">OUT OF RANGE</td>
-            <td style="color: #666;">NO OBSTACLE</td>
-            <td class="num" style="color: #666;">OFF</td>
-            <td class="num" style="color: #666;">--</td>
-            <td>Standby / Idle mode</td>
-          </tr>
-        </tbody>
-      </table>
+    <!-- Humidity Card -->
+    <div class="card card-hum">
+      <div class="card-header">
+        <span class="card-title">Humidity (DHT11)</span>
+        <span class="card-icon">&#128167;</span>
+      </div>
+      <div class="card-value-wrap">
+        <span class="card-value" id="valHum">--</span>
+        <span class="card-unit">% RH</span>
+      </div>
+      <div class="meta-row">
+        <span>Comfort Level:</span>
+        <span class="badge" id="badgeHum">Measuring...</span>
+      </div>
     </div>
 
-    <!-- SECTION 3: CLOUD SERVER TELEMETRY INGEST (a.md / Production API) -->
-    <div class="section-title">
-      <span>03 // HYDRA CLOUD SERVER INGEST (FLOOD TELEMETRY)</span>
-      <span id="server-updated-tag" style="font-size: 10px; color: #888;">STANDBY</span>
+    <!-- Gas & Air Quality Card -->
+    <div class="card card-gas">
+      <div class="card-header">
+        <span class="card-title">Air Quality (MQ-135)</span>
+        <span class="card-icon">&#127788;&#65039;</span>
+      </div>
+      <div class="card-value-wrap">
+        <span class="card-value" id="valGasPpm">--</span>
+        <span class="card-unit">est. PPM</span>
+      </div>
+      <div class="meta-row">
+        <span>Raw ADC: <strong id="valGasAdc">--</strong> (<span id="valGasVolt">--</span>V)</span>
+        <span class="badge" id="badgeGas">Checking</span>
+      </div>
     </div>
-
-    <div class="table-container">
-      <table>
-        <thead>
-          <tr>
-            <th>TARGET API ENDPOINT</th>
-            <th>UPLINK STATUS</th>
-            <th>LATENCY</th>
-            <th>SUCCESS</th>
-            <th>FAIL</th>
-            <th>LAST SERVER RESPONSE</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td id="srv-url" style="color:#FFF; word-break:break-all;">https://zenithkandel.com.np/hydra/backend/api/telemetry/flood.php</td>
-            <td id="srv-status" class="num">CONNECTING...</td>
-            <td id="srv-latency" class="num">-- ms</td>
-            <td id="srv-ok" class="num">0</td>
-            <td id="srv-fail" class="num">0</td>
-            <td id="srv-resp" style="font-size:11px; color:#AAA; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">WAITING FOR FIRST UPLINK</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- SECTION 4: SYSTEM DIAGNOSTICS -->
-    <div class="section-title">
-      <span>04 // SYSTEM DIAGNOSTICS</span>
-      <span>ESP32-S3 SUPER MINI</span>
-    </div>
-
-    <div class="table-container">
-      <table>
-        <thead>
-          <tr>
-            <th>IP ADDRESS</th>
-            <th>WI-FI RSSI</th>
-            <th>SYSTEM UPTIME</th>
-            <th>FREE MEMORY</th>
-            <th>WIRING PINOUT</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td id="sys-ip" class="num">---.---.---.---</td>
-            <td id="sys-rssi" class="num">-- dBm</td>
-            <td id="sys-uptime" class="num">00:00:00</td>
-            <td id="sys-heap" class="num">-- KB</td>
-            <td class="num">TRIG: 4 &bull; ECHO: 5 &bull; LED: 7 &amp; 8</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- FOOTER -->
-    <footer>
-      <span>ESP32-S3 SUPER MINI &bull; PROPORTIONAL RADAR BLINK</span>
-      <span><a href="/update">[ OVER-THE-AIR FIRMWARE UPDATE ]</a></span>
-    </footer>
-
   </div>
 
+  <!-- System Info Bar -->
+  <div class="system-bar">
+    <div class="sys-item">
+      <span class="sys-label">Air Status</span>
+      <span class="sys-val" id="sysAirStatus">Warming up</span>
+    </div>
+    <div class="sys-item">
+      <span class="sys-label">WiFi Signal</span>
+      <span class="sys-val" id="sysRssi">-- dBm</span>
+    </div>
+    <div class="sys-item">
+      <span class="sys-label">ESP8266 IP</span>
+      <span class="sys-val" id="sysIp">--</span>
+    </div>
+    <div class="sys-item">
+      <span class="sys-label">Cloud Ingest</span>
+      <span class="sys-val" id="sysServerStatus">STANDBY</span>
+    </div>
+    <div class="sys-item">
+      <span class="sys-label">Server Latency</span>
+      <span class="sys-val" id="sysServerLatency">-- ms</span>
+    </div>
+    <div class="sys-item">
+      <span class="sys-label">Sync Count</span>
+      <span class="sys-val" id="sysServerCounts">0 / 0</span>
+    </div>
+    <div class="sys-item">
+      <span class="sys-label">System Uptime</span>
+      <span class="sys-val" id="sysUptime">--s</span>
+    </div>
+    <div class="sys-item">
+      <span class="sys-label">Free Heap</span>
+      <span class="sys-val" id="sysHeap">-- bytes</span>
+    </div>
+  </div>
+
+  <footer>
+    Hardware: ESP8266 (NodeMCU/Wemos) &bull; DHT11 &bull; MQ-135 &bull; ArduinoOTA &amp; WebOTA Active
+  </footer>
+
   <script>
-    let failedFetches = 0;
-
-    async function pollTelemetry() {
+    async function updateTelemetry() {
       try {
-        const response = await fetch('/api/data');
-        if (!response.ok) throw new Error('HTTP ' + response.status);
-        const data = await response.json();
-        failedFetches = 0;
+        const res = await fetch('/data');
+        if (!res.ok) throw new Error('HTTP error ' + res.status);
+        const d = await res.json();
 
-        document.getElementById('conn-badge').className = "badge solid";
-        document.getElementById('conn-badge').innerHTML = '<span class="pulse"></span> LIVE COMMS';
+        // Temperature & Humidity
+        document.getElementById('valTemp').innerText = d.temperatureC.toFixed(1);
+        document.getElementById('valTempF').innerText = d.temperatureF.toFixed(1) + ' °F';
+        document.getElementById('valHeatIndex').innerText = d.heatIndexC.toFixed(1) + ' °C';
+        document.getElementById('valHum').innerText = d.humidity.toFixed(1);
 
-        // 1. Distance Telemetry
-        if (data.sensor.valid) {
-          document.getElementById('dist-cm').innerText = data.sensor.dist_cm.toFixed(1);
-          document.getElementById('dist-in').innerText = data.sensor.dist_in.toFixed(1);
-          document.getElementById('dist-m').innerText = data.sensor.dist_m.toFixed(2);
-          document.getElementById('pulse-us').innerText = data.sensor.pulse_us;
-          document.getElementById('sensor-health').innerText = "STATUS: ECHO VALID";
-          document.getElementById('sensor-health').style.color = "#FFFFFF";
-
-          // Range bar gauge (0 to 300 cm)
-          const pct = Math.min(100, Math.max(0, (data.sensor.dist_cm / 300.0) * 100));
-          document.getElementById('range-fill').style.width = pct + '%';
+        // Humidity Comfort Badge
+        const humBadge = document.getElementById('badgeHum');
+        if (d.humidity < 30) {
+          humBadge.innerText = 'Dry';
+          humBadge.style.color = '#f59e0b';
+        } else if (d.humidity <= 60) {
+          humBadge.innerText = 'Optimal';
+          humBadge.style.color = '#10b981';
         } else {
-          document.getElementById('dist-cm').innerText = "--.-";
-          document.getElementById('dist-in').innerText = "--.-";
-          document.getElementById('dist-m').innerText = "--.--";
-          document.getElementById('pulse-us').innerText = "--";
-          document.getElementById('sensor-health').innerText = "STATUS: OUT OF RANGE / NO ECHO";
-          document.getElementById('sensor-health').style.color = "#888888";
-          document.getElementById('range-fill').style.width = '0%';
+          humBadge.innerText = 'High Humidity';
+          humBadge.style.color = '#3b82f6';
         }
 
-        // 2. Proximity Zone & Radar Status
-        document.getElementById('radar-zone-text').innerText = data.radar.zone;
-        document.getElementById('zone-badge').innerText = "ZONE: " + data.radar.zone;
+        // MQ-135 Gas
+        document.getElementById('valGasPpm').innerText = Math.round(d.gasPPM);
+        document.getElementById('valGasAdc').innerText = d.gasRawADC;
+        document.getElementById('valGasVolt').innerText = d.gasVoltage.toFixed(2);
 
-        if (data.sensor.valid) {
-          document.getElementById('blink-freq-text').innerText = "BLINK RATE: " + data.radar.interval_ms + " MS (" + data.radar.rate_desc + ")";
-          document.getElementById('radar-sub-desc').innerText = "DISTANCE " + data.sensor.dist_cm.toFixed(1) + " CM &rarr; " + data.radar.rate_desc + " PULSE";
+        // Air Status Badge
+        const gasBadge = document.getElementById('badgeGas');
+        gasBadge.innerText = d.airQualityStatus;
+        gasBadge.className = 'badge';
+        if (d.airQualityStatus.includes('Preheating')) {
+          gasBadge.classList.add('badge-moderate');
+        } else if (d.airQualityStatus.includes('Excellent')) {
+          gasBadge.classList.add('badge-excellent');
+        } else if (d.airQualityStatus.includes('Good')) {
+          gasBadge.classList.add('badge-good');
+        } else if (d.airQualityStatus.includes('Moderate')) {
+          gasBadge.classList.add('badge-moderate');
+        } else if (d.airQualityStatus.includes('Poor')) {
+          gasBadge.classList.add('badge-poor');
         } else {
-          document.getElementById('blink-freq-text').innerText = "BLINK RATE: STANDBY (OFF)";
-          document.getElementById('radar-sub-desc').innerText = "NO OBSTACLE DETECTED WITHIN 400 CM";
+          gasBadge.classList.add('badge-hazard');
         }
 
-        // Mirror hardware LED in browser
-        const webLed = document.getElementById('web-led-indicator');
-        const ledText = document.getElementById('led-text-state');
-        if (data.radar.led_state) {
-          webLed.className = "led-strobe-indicator lit";
-          ledText.innerText = "HIGH";
-        } else {
-          webLed.className = "led-strobe-indicator";
-          ledText.innerText = "LOW";
-        }
+        // System items
+        document.getElementById('sysAirStatus').innerText = d.airQualityStatus;
+        document.getElementById('sysRssi').innerText = d.rssi + ' dBm';
+        document.getElementById('sysIp').innerText = d.ip;
+        document.getElementById('sysUptime').innerText = formatUptime(d.uptimeSeconds);
+        document.getElementById('sysHeap').innerText = d.freeHeap + ' B';
 
-        // 3. System Diagnostics
-        document.getElementById('sys-ip').innerText = data.sys.ip;
-        document.getElementById('sys-rssi').innerText = data.sys.rssi + " dBm";
-        document.getElementById('sys-uptime').innerText = formatUptime(data.sys.uptime_sec);
-        document.getElementById('sys-heap').innerText = Math.round(data.sys.free_heap / 1024) + " KB";
+        // Server Ingest Telemetry
+        if (d.server) {
+          const srvBadge = document.getElementById('server-badge');
+          document.getElementById('sysServerLatency').innerText = d.server.last_latency_ms + ' ms';
+          document.getElementById('sysServerCounts').innerText = d.server.success_count + ' / ' + d.server.fail_count;
 
-        // 4. Server Ingest Status
-        const serverBadge = document.getElementById('server-badge');
-        if (data.server) {
-          document.getElementById('srv-url').innerText = data.server.url;
-          document.getElementById('srv-latency').innerText = data.server.last_latency_ms + " ms";
-          document.getElementById('srv-ok').innerText = data.server.success_count;
-          document.getElementById('srv-fail').innerText = data.server.fail_count;
-          document.getElementById('srv-resp').innerText = data.server.last_response || '--';
-
-          if (data.server.last_code >= 200 && data.server.last_code < 300) {
-            serverBadge.className = "badge solid";
-            serverBadge.innerHTML = '<span class="pulse"></span> CLOUD: 200 OK';
-            document.getElementById('srv-status').innerHTML = '<span style="color:#FFF;">HTTP ' + data.server.last_code + ' OK</span>';
-            const agoSec = Math.round(data.server.last_send_ago_ms / 100) / 10;
-            document.getElementById('server-updated-tag').innerText = 'SYNCED ' + agoSec + 'S AGO';
-          } else if (data.server.last_code > 0) {
-            serverBadge.className = "badge warn";
-            serverBadge.innerText = 'CLOUD: HTTP ' + data.server.last_code;
-            document.getElementById('srv-status').innerText = 'HTTP ' + data.server.last_code;
-            document.getElementById('server-updated-tag').innerText = 'HTTP WARNING';
+          if (d.server.last_code >= 200 && d.server.last_code < 300) {
+            srvBadge.innerText = 'CLOUD: 200 OK';
+            srvBadge.style.background = 'linear-gradient(135deg, #059669, #10b981)';
+            document.getElementById('sysServerStatus').innerText = 'HTTP ' + d.server.last_code + ' OK';
+            document.getElementById('sysServerStatus').style.color = '#10b981';
+          } else if (d.server.last_code > 0) {
+            srvBadge.innerText = 'CLOUD: HTTP ' + d.server.last_code;
+            srvBadge.style.background = 'linear-gradient(135deg, #d97706, #f59e0b)';
+            document.getElementById('sysServerStatus').innerText = 'HTTP ' + d.server.last_code;
+            document.getElementById('sysServerStatus').style.color = '#f59e0b';
           } else {
-            serverBadge.className = "badge outline";
-            serverBadge.innerText = 'CLOUD: STANDBY';
-            document.getElementById('srv-status').innerText = 'INITIALIZING...';
-            document.getElementById('server-updated-tag').innerText = 'STANDBY';
+            srvBadge.innerText = 'CLOUD: STANDBY';
+            srvBadge.style.background = 'rgba(255,255,255,0.1)';
+            document.getElementById('sysServerStatus').innerText = 'CONNECTING...';
+            document.getElementById('sysServerStatus').style.color = '#9ca3af';
           }
         }
 
+        // Keep live pulse active
+        document.getElementById('liveDot').style.background = '#10b981';
       } catch (err) {
-        failedFetches++;
-        if (failedFetches > 3) {
-          document.getElementById('conn-badge').className = "badge warn";
-          document.getElementById('conn-badge').innerText = "OFFLINE [RETRYING...]";
-        }
+        console.error('Fetch error:', err);
+        document.getElementById('liveDot').style.background = '#ef4444';
       }
     }
 
-    function formatUptime(totalSecs) {
-      const h = Math.floor(totalSecs / 3600).toString().padStart(2, '0');
-      const m = Math.floor((totalSecs % 3600) / 60).toString().padStart(2, '0');
-      const s = Math.floor(totalSecs % 60).toString().padStart(2, '0');
-      return h + ":" + m + ":" + s;
+    function formatUptime(sec) {
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = sec % 60;
+      if (h > 0) return `${h}h ${m}m ${s}s`;
+      if (m > 0) return `${m}m ${s}s`;
+      return `${s}s`;
     }
 
-    pollTelemetry();
-    setInterval(pollTelemetry, 150); // Fast 150ms polling to track live blink state
+    // Initial call and periodic poll every 2 seconds
+    updateTelemetry();
+    setInterval(updateTelemetry, 2000);
   </script>
 </body>
 </html>
 )rawliteral";
 
 /* ====================================================================
- * 5. EMBEDDED SHARP MONOCHROME WEB OTA HTML
+ * HYDRA CLOUD SERVER TELEMETRY INGEST (HTTP/HTTPS POST)
  * ==================================================================== */
-const char OTA_INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ESP32-S3 // FIRMWARE OTA</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; border-radius: 0 !important; }
-    body { background: #000000; color: #FFFFFF; font-family: ui-monospace, Menlo, Consolas, monospace; padding: 20px; line-height: 1.4; -webkit-font-smoothing: antialiased; }
-    .box { max-width: 520px; margin: 40px auto; border: 1px solid #FFFFFF; padding: 24px; background: #080808; }
-    h1 { font-size: 16px; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 8px; font-weight: 900; }
-    p { font-size: 11px; color: #888888; margin-bottom: 20px; letter-spacing: 1px; }
-    input[type=file] { display: block; width: 100%; border: 1px solid #333333; padding: 12px; background: #000000; color: #FFFFFF; font-size: 11px; margin-bottom: 16px; cursor: pointer; }
-    input[type=file]:hover { border-color: #FFFFFF; }
-    .btn { display: inline-block; width: 100%; padding: 12px; font-size: 12px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; color: #000000; background: #FFFFFF; border: 1px solid #FFFFFF; cursor: pointer; text-align: center; text-decoration: none; margin-bottom: 10px; }
-    .btn:hover { background: #000000; color: #FFFFFF; }
-    .btn.outline { background: #000000; color: #888888; border-color: #333333; }
-    .btn.outline:hover { color: #FFFFFF; border-color: #FFFFFF; }
-    .bar-wrap { border: 1px solid #333333; height: 16px; margin: 16px 0; display: none; background: #111111; }
-    .bar-fill { height: 100%; width: 0%; background: #FFFFFF; transition: width 0.1s linear; }
-    #status { font-size: 11px; letter-spacing: 1px; margin-top: 10px; text-transform: uppercase; font-weight: 700; color: #AAAAAA; }
-    .badge { display: inline-block; padding: 2px 6px; border: 1px solid #FFF; font-size: 9px; margin-bottom: 12px; }
-  </style>
-</head>
-<body>
-  <div class="box">
-    <span class="badge">[ ESP32-S3 FIRMWARE RECOVERY ]</span>
-    <h1>FIRMWARE FLASH PORTAL</h1>
-    <p>SELECT COMPILED .BIN FIRMWARE BINARY TO REFLASH OVER WI-FI</p>
-    
-    <form id="upload_form" enctype="multipart/form-data" method="POST" action="/update">
-      <input type="file" name="update" id="file" accept=".bin" required onchange="fileSelected()">
-      <div class="bar-wrap" id="bar_wrap"><div class="bar-fill" id="bar_fill"></div></div>
-      <button type="submit" id="btn_submit" class="btn">[ FLASH .BIN FIRMWARE ]</button>
-      <a href="/" class="btn outline">[ CANCEL &amp; RETURN TO DASHBOARD ]</a>
-      <div id="status">STATUS: STANDBY // WAITING FOR BINARY FILE</div>
-    </form>
-  </div>
-
-  <script>
-    function fileSelected() {
-      const f = document.getElementById('file').files[0];
-      if (f) document.getElementById('status').innerText = 'SELECTED: ' + f.name + ' (' + Math.round(f.size / 1024) + ' KB)';
-    }
-
-    document.getElementById('upload_form').onsubmit = function(e) {
-      e.preventDefault();
-      const f = document.getElementById('file').files[0];
-      if (!f) return;
-
-      const data = new FormData();
-      data.append('update', f);
-
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/update', true);
-
-      document.getElementById('bar_wrap').style.display = 'block';
-      document.getElementById('btn_submit').style.display = 'none';
-      document.getElementById('status').innerText = 'FLASHING FIRMWARE TO SPI FLASH... DO NOT POWER OFF';
-
-      xhr.upload.onprogress = function(e) {
-        if (e.lengthComputable) {
-          const pct = Math.round((e.loaded / e.total) * 100);
-          document.getElementById('bar_fill').style.width = pct + '%';
-          document.getElementById('status').innerText = 'UPLOADING: ' + pct + '%';
-        }
-      };
-
-      xhr.onload = function() {
-        if (xhr.status === 200) {
-          document.getElementById('bar_fill').style.width = '100%';
-          document.getElementById('status').innerText = 'FLASH COMPLETE! REBOOTING ESP32-S3 NODE...';
-          setTimeout(() => { window.location.href = '/'; }, 6000);
-        } else {
-          document.getElementById('status').innerText = 'FLASH ERROR: ' + xhr.responseText;
-          document.getElementById('btn_submit').style.display = 'block';
-        }
-      };
-
-      xhr.onerror = function() {
-        document.getElementById('status').innerText = 'NETWORK / COMMS ERROR DURING FLASH';
-        document.getElementById('btn_submit').style.display = 'block';
-      };
-
-      xhr.send(data);
-    };
-  </script>
-</body>
-</html>
-)rawliteral";
-
-/* ====================================================================
- * 6. ULTRASONIC SENSOR MEASUREMENT & DYNAMIC PROXIMITY BLINK
- * ==================================================================== */
-
-void readUltrasonicSensor() {
-  digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-
-  pulseDurationUs = pulseIn(ECHO_PIN, HIGH, 25000);
-
-  if (pulseDurationUs > 0) {
-    float dist = ((float)pulseDurationUs * 0.0343) / 2.0;
-
-    if (dist >= 2.0 && dist <= 400.0) {
-      currentDistanceCm = dist;
-      currentDistanceIn = dist / 2.54;
-      currentDistanceM  = dist / 100.0;
-      isSensorValid     = true;
-
-      // Dynamic Proportional Blink Calculation:
-      // Near (4cm) -> 50ms interval (Very Fast ~10-20 Hz)
-      // Far  (250cm) -> 1000ms interval (Slow ~0.5-1 Hz)
-      float clamped = constrain(currentDistanceCm, 4.0, 250.0);
-      currentBlinkIntervalMs = (unsigned long)map((long)(clamped * 10), 40, 2500, 50, 1000);
-
-      // Categorize Zone for Diagnostics
-      if (currentDistanceCm < 20.0) {
-        proximityZone = "CRITICAL PROXIMITY (FASTEST BLINK)";
-      } else if (currentDistanceCm < 60.0) {
-        proximityZone = "CLOSE RANGE (FAST BLINK)";
-      } else if (currentDistanceCm < 150.0) {
-        proximityZone = "MID RANGE (MODERATE BLINK)";
-      } else {
-        proximityZone = "FAR RANGE (SLOW BLINK)";
-      }
-    } else {
-      isSensorValid = false;
-      proximityZone = "OUT OF RANGE (> 400 CM)";
-    }
-  } else {
-    isSensorValid = false;
-    proximityZone = "NO ECHO / STANDBY";
-  }
-}
-
-void updateProximityLedBlink() {
-  if (!isSensorValid) {
-    if (currentLedState) {
-      currentLedState = false;
-      digitalWrite(HIGH_DIST_LED, LOW);
-    }
-    return;
-  }
-
-  // Non-blocking proportional blinking on external alert strobe
-  unsigned long now = millis();
-  if (now - lastBlinkToggleTime >= currentBlinkIntervalMs) {
-    lastBlinkToggleTime = now;
-    currentLedState = !currentLedState;
-    digitalWrite(HIGH_DIST_LED, currentLedState ? HIGH : LOW);
-  }
-}
-
-/* ====================================================================
- * 6.5. HYDRA SERVER TELEMETRY INGEST DISPATCH (HTTP/HTTPS POST)
- * ==================================================================== */
-
 void sendTelemetryToServer() {
   if (WiFi.status() != WL_CONNECTED) {
     return;
   }
 
-  // Build JSON payload matching a.md Section 2.A (Node 01 Flood Telemetry)
+  // Build JSON Payload matching a.md Section 2.B (Node 02 Fire Telemetry)
   String payload = "{";
   payload += "\"node_uid\":\"" + String(NODE_UID) + "\",";
-  payload += "\"dist_cm\":" + String(isSensorValid ? currentDistanceCm : 0.0, 1) + ",";
-  payload += "\"pulse_us\":" + String(pulseDurationUs) + ",";
-  payload += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-  payload += "\"ip_address\":\"" + WiFi.localIP().toString() + "\",";
-  payload += "\"radar_zone\":\"" + proximityZone + "\",";
-  payload += "\"interval_ms\":" + String(isSensorValid ? currentBlinkIntervalMs : 0);
+  payload += "\"temperature_c\":" + String(temperatureC, 2) + ",";
+  payload += "\"temperature_f\":" + String(temperatureF, 2) + ",";
+  payload += "\"humidity\":" + String(humidity, 2) + ",";
+  payload += "\"gas_ppm\":" + String(gasPPM, 2) + ",";
+  payload += "\"gas_raw_adc\":" + String(gasRawADC) + ",";
+  payload += "\"air_quality_status\":\"" + airQualityStatus + "\",";
+  payload += "\"rssi\":" + String(WiFi.RSSI());
   payload += "}";
 
+  WiFiClientSecure secureClient;
+  WiFiClient client;
   HTTPClient http;
   http.setTimeout(3000);
   unsigned long startT = millis();
@@ -885,8 +604,7 @@ void sendTelemetryToServer() {
   int httpCode = 0;
 
   if (isHttps) {
-    WiFiClientSecure secureClient;
-    secureClient.setInsecure(); // Skip certificate verification for embedded TLS
+    secureClient.setInsecure(); // Skip certificate verification for embedded client
     secureClient.setTimeout(3000);
     if (http.begin(secureClient, SERVER_API_URL)) {
       http.addHeader("Content-Type", "application/json");
@@ -899,7 +617,6 @@ void sendTelemetryToServer() {
       http.end();
     }
   } else {
-    WiFiClient client;
     client.setTimeout(3000);
     if (http.begin(client, SERVER_API_URL)) {
       http.addHeader("Content-Type", "application/json");
@@ -918,67 +635,43 @@ void sendTelemetryToServer() {
 
   if (httpCode >= 200 && httpCode < 300) {
     serverSuccessCount++;
-    Serial.printf("[SERVER] Flood Telemetry Ingest SUCCESS (HTTP %d, %lums): %s\n",
+    Serial.printf("[SERVER] Fire Telemetry Ingest SUCCESS (HTTP %d, %lums): %s\n",
                   httpCode, lastServerDurationMs, lastServerResponse.c_str());
   } else if (httpCode > 0) {
     serverFailCount++;
-    Serial.printf("[SERVER] Flood Telemetry Ingest WARN (HTTP %d, %lums): %s\n",
+    Serial.printf("[SERVER] Fire Telemetry Ingest WARN (HTTP %d, %lums): %s\n",
                   httpCode, lastServerDurationMs, lastServerResponse.c_str());
   } else {
     serverFailCount++;
-    Serial.printf("[SERVER] Flood Telemetry Ingest FAILED: %s (code %d, %lums)\n",
+    Serial.printf("[SERVER] Fire Telemetry Ingest FAILED: %s (code %d, %lums)\n",
                   http.errorToString(httpCode).c_str(), httpCode, lastServerDurationMs);
   }
 }
 
 /* ====================================================================
- * 7. WEB SERVER HANDLERS & OTA
+ * WEB SERVER HANDLERS
  * ==================================================================== */
 
+// Serves the HTML Dashboard
 void handleRoot() {
   server.send_P(200, "text/html", INDEX_HTML);
 }
 
+// Serves the live JSON telemetry data
 void handleData() {
-  String rateDesc;
-  if (!isSensorValid) {
-    rateDesc = "OFF";
-  } else if (currentBlinkIntervalMs <= 100) {
-    rateDesc = "VERY FAST";
-  } else if (currentBlinkIntervalMs <= 250) {
-    rateDesc = "FAST";
-  } else if (currentBlinkIntervalMs <= 600) {
-    rateDesc = "MEDIUM";
-  } else {
-    rateDesc = "SLOW";
-  }
-
   String json = "{";
-
-  // System Diagnostics
-  json += "\"sys\":{";
-  json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+  json += "\"temperatureC\":" + String(temperatureC, 2) + ",";
+  json += "\"temperatureF\":" + String(temperatureF, 2) + ",";
+  json += "\"humidity\":" + String(humidity, 2) + ",";
+  json += "\"heatIndexC\":" + String(heatIndexC, 2) + ",";
+  json += "\"gasRawADC\":" + String(gasRawADC) + ",";
+  json += "\"gasVoltage\":" + String(gasVoltage, 3) + ",";
+  json += "\"gasPPM\":" + String(gasPPM, 2) + ",";
+  json += "\"airQualityStatus\":\"" + airQualityStatus + "\",";
   json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-  json += "\"uptime_sec\":" + String(millis() / 1000) + ",";
-  json += "\"free_heap\":" + String(ESP.getFreeHeap());
-  json += "},";
-
-  // Ultrasonic Sensor Telemetry
-  json += "\"sensor\":{";
-  json += "\"valid\":" + String(isSensorValid ? "true" : "false") + ",";
-  json += "\"dist_cm\":" + String(isSensorValid ? currentDistanceCm : 0.0, 1) + ",";
-  json += "\"dist_in\":" + String(isSensorValid ? currentDistanceIn : 0.0, 1) + ",";
-  json += "\"dist_m\":" + String(isSensorValid ? currentDistanceM : 0.0, 2) + ",";
-  json += "\"pulse_us\":" + String(pulseDurationUs);
-  json += "},";
-
-  // Proximity Radar & LED Blink State
-  json += "\"radar\":{";
-  json += "\"zone\":\"" + proximityZone + "\",";
-  json += "\"interval_ms\":" + String(isSensorValid ? currentBlinkIntervalMs : 0) + ",";
-  json += "\"rate_desc\":\"" + rateDesc + "\",";
-  json += "\"led_state\":" + String(currentLedState ? "true" : "false");
-  json += "},";
+  json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+  json += "\"uptimeSeconds\":" + String(millis() / 1000) + ",";
+  json += "\"freeHeap\":" + String(ESP.getFreeHeap()) + ",";
 
   // Server Uplink Status
   json += "\"server\":{";
@@ -1000,175 +693,133 @@ void handleData() {
   server.send(200, "application/json", json);
 }
 
-void setupWebOTA() {
-  server.on("/update", HTTP_GET, []() {
-    if (strlen(otaUsername) > 0 && strlen(otaPassword) > 0) {
-      if (!server.authenticate(otaUsername, otaPassword)) {
-        return server.requestAuthentication();
-      }
-    }
-    server.send_P(200, "text/html", OTA_INDEX_HTML);
-  });
-
-  server.on("/update", HTTP_POST, []() {
-    if (strlen(otaUsername) > 0 && strlen(otaPassword) > 0) {
-      if (!server.authenticate(otaUsername, otaPassword)) {
-        return server.requestAuthentication();
-      }
-    }
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/plain", (Update.hasError()) ? "OTA_FAIL" : "OTA_OK");
-    delay(1000);
-    ESP.restart();
-  }, []() {
-    HTTPUpload& upload = server.upload();
-    if (upload.status == UPLOAD_FILE_START) {
-      Serial.printf("[WebOTA] Update file received: %s\n", upload.filename.c_str());
-      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-        Update.printError(Serial);
-      }
-    } else if (upload.status == UPLOAD_FILE_WRITE) {
-      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-        Update.printError(Serial);
-      }
-    } else if (upload.status == UPLOAD_FILE_END) {
-      if (Update.end(true)) {
-        Serial.printf("[WebOTA] Success! %u bytes written. Rebooting...\n", upload.totalSize);
-      } else {
-        Update.printError(Serial);
-      }
-    }
-  });
+void handleNotFound() {
+  server.send(404, "text/plain", "404: Not Found on ESP8266");
 }
 
-void setupArduinoOTA() {
-  ArduinoOTA.setHostname(MDNS_HOSTNAME);
-  if (strlen(otaPassword) > 0) {
-    ArduinoOTA.setPassword(otaPassword);
+/* ====================================================================
+ * SETUP FUNCTION
+ * ==================================================================== */
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("\n\n====================================");
+  Serial.println("  ESP8266 Sensor Node Starting...   ");
+  Serial.println("====================================");
+
+  // Initialize DHT11
+  dht.begin();
+  pinMode(MQ135_PIN, INPUT);
+
+  // Initialize Onboard LED (blinks during connection, glows solid when connected)
+  pinMode(ONBOARD_LED, OUTPUT);
+  digitalWrite(ONBOARD_LED, LED_OFF);
+
+  // Connect to WiFi
+  Serial.printf("Connecting to %s ", ssid);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  int attempt = 0;
+  bool blinkState = false;
+  while (WiFi.status() != WL_CONNECTED && attempt < 30) {
+    delay(500);
+    blinkState = !blinkState;
+    digitalWrite(ONBOARD_LED, blinkState ? LED_ON : LED_OFF);
+    Serial.print(".");
+    attempt++;
   }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(ONBOARD_LED, LED_ON); // Solid ON when Wi-Fi is connected
+    Serial.println("\nWiFi Connected!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    digitalWrite(ONBOARD_LED, LED_OFF);
+    Serial.println("\nWiFi Failed to connect. Starting in Fallback Mode.");
+  }
+
+  // Set up mDNS responder
+  if (MDNS.begin(hostName)) {
+    Serial.printf("mDNS responder started: http://%s.local\n", hostName);
+    MDNS.addService("http", "tcp", 80);
+  }
+
+  // 1. Setup Web OTA updater (/update endpoint)
+  httpUpdater.setup(&server, "/update", otaUsername, otaPassword);
+  Serial.println("Web OTA active at: http://<IP>/update");
+
+  // 2. Setup ArduinoOTA (for IDE direct wireless flashing)
+  ArduinoOTA.setHostname(hostName);
 
   ArduinoOTA.onStart([]() {
     String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
-    Serial.println("[ArduinoOTA] Network flash initiated: " + type);
+    Serial.println("Start updating " + type);
   });
   ArduinoOTA.onEnd([]() {
-    Serial.println("\n[ArduinoOTA] Flash complete. Rebooting...");
+    Serial.println("\nEnd of OTA Update");
   });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("[ArduinoOTA] Progress: %u%%\r", (progress / (total / 100)));
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
   });
   ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("[ArduinoOTA] Error[%u]: ", error);
+    Serial.printf("Error[%u]: ", error);
     if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
     else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
     else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
     else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
     else if (error == OTA_END_ERROR) Serial.println("End Failed");
   });
-
   ArduinoOTA.begin();
-}
+  Serial.println("ArduinoOTA ready for IDE flashing.");
 
-void handleNotFound() {
-  server.send(404, "text/plain", "404: Not Found on ESP32-S3 Distance Server");
-}
-
-/* ====================================================================
- * 8. SETUP & LOOP
- * ==================================================================== */
-
-void setup() {
-  Serial.begin(115200);
-  delay(1000);
-
-  Serial.println("\n==============================================");
-  Serial.println("  ESP32-S3 SUPER MINI - PROXIMITY RADAR");
-  Serial.println("==============================================");
-
-  // Initialize GPIO Pins
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-  pinMode(HIGH_DIST_LED, OUTPUT);
-  pinMode(ONBOARD_LED, OUTPUT);
-
-  digitalWrite(TRIG_PIN, LOW);
-  digitalWrite(HIGH_DIST_LED, LOW);
-  digitalWrite(ONBOARD_LED, LOW);
-
-  // Connect to Wi-Fi
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.printf("[WIFI] Connecting to '%s'", WIFI_SSID);
-
-  unsigned long startAttemptTime = millis();
-  bool blinkState = false;
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
-    delay(500);
-    blinkState = !blinkState;
-    digitalWrite(ONBOARD_LED, blinkState ? HIGH : LOW);
-    Serial.print(".");
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    digitalWrite(ONBOARD_LED, HIGH); // Solid ON when Wi-Fi is connected
-    Serial.print("[WIFI] Connected! Assigned IP: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    digitalWrite(ONBOARD_LED, LOW);
-    Serial.println("[WIFI] Router connection timed out. Starting SoftAP Fallback...");
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(AP_SSID, AP_PASSWORD);
-    Serial.printf("[WIFI] SoftAP active! SSID: '%s' | Password: '%s'\n", AP_SSID, AP_PASSWORD);
-    Serial.print("[WIFI] Access dashboard at: http://");
-    Serial.println(WiFi.softAPIP());
-  }
-
-  // Setup mDNS
-  if (MDNS.begin(MDNS_HOSTNAME)) {
-    Serial.printf("[mDNS] Responding at: http://%s.local\n", MDNS_HOSTNAME);
-    MDNS.addService("http", "tcp", 80);
-  }
-
-  // Setup HTTP Web Server Routes
+  // Configure Web Server Routes
   server.on("/", HTTP_GET, handleRoot);
-  server.on("/api/data", HTTP_GET, handleData);
-  server.on("/api/send_now", HTTP_GET, []() {
+  server.on("/data", HTTP_GET, handleData);
+  server.on("/send_now", HTTP_GET, []() {
     sendTelemetryToServer();
     server.send(200, "application/json", "{\"status\":\"TRIGGERED\",\"http_code\":" + String(lastServerHttpCode) + "}");
   });
-  setupWebOTA();
   server.onNotFound(handleNotFound);
-  server.begin();
-  Serial.println("[HTTP] Web server listening on port 80.");
 
-  setupArduinoOTA();
+  server.begin();
+  Serial.println("HTTP server started!");
+  
+  // Initial sensor read
+  readSensors();
 }
 
+/* ====================================================================
+ * MAIN LOOP
+ * ==================================================================== */
 void loop() {
-  server.handleClient();
-  ArduinoOTA.handle();
-
   // Onboard LED Wi-Fi Status Indicator: Glows SOLID when Wi-Fi is connected
   if (WiFi.status() == WL_CONNECTED) {
-    digitalWrite(ONBOARD_LED, HIGH); // Solid ON when Wi-Fi is connected
+    digitalWrite(ONBOARD_LED, LED_ON); // Solid ON when Wi-Fi is connected (active-LOW)
   } else {
-    digitalWrite(ONBOARD_LED, (millis() % 1000 < 150) ? HIGH : LOW); // Short pulse if disconnected
+    digitalWrite(ONBOARD_LED, (millis() % 1000 < 150) ? LED_ON : LED_OFF); // Short pulse if disconnected
   }
 
-  // Periodically read ultrasonic distance
-  unsigned long now = millis();
-  if (now - lastMeasureTime >= MEASURE_INTERVAL_MS) {
-    lastMeasureTime = now;
-    readUltrasonicSensor();
-  }
+  // Handle OTA routines
+  ArduinoOTA.handle();
 
-  // Continuously update alert strobe LED blinking based on current distance
-  updateProximityLedBlink();
+  // Handle mDNS queries
+  MDNS.update();
+
+  // Handle incoming HTTP client requests
+  server.handleClient();
+
+  // Non-blocking sensor update
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastSensorReadTime >= sensorReadInterval) {
+    lastSensorReadTime = currentMillis;
+    readSensors();
+  }
 
   // Periodic Telemetry Transmission to HYDRA Server API (every 2.0s per a.md)
-  if (now - lastServerSendMillis >= TELEMETRY_SEND_INTERVAL_MS) {
-    lastServerSendMillis = now;
+  if (currentMillis - lastServerSendMillis >= TELEMETRY_SEND_INTERVAL_MS) {
+    lastServerSendMillis = currentMillis;
     sendTelemetryToServer();
   }
 }
