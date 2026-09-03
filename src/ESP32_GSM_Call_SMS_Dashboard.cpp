@@ -5,21 +5,25 @@
  * Communication   : Hardware Serial (Standard ESP32: GPIO 16 RX2, GPIO 17 TX2 @ 9600 Baud)
  *                   (ESP32-S3 / Nano: GPIO 4 RX, GPIO 5 TX @ 9600 Baud)
  * Hardware Output : Status LED (GPIO 2 / 13), Alert Strobe LED (GPIO 12 / 7), Siren Relay (GPIO 14 / 6)
+ * Cloud Endpoint  : https://zenithkandel.com.np/hydra/backend/api/nodes/level1.php
  * Wi-Fi           : SSID "sakshyam" | Password "sakshyam"
- * UI Theme        : Stark Monochrome High-Contrast (Black & White, 0px Radius)
- * Features        : Web & API Triggered Phone Calls, SMS Sender, Multi-Level Alert Dispatch,
- *                   Hardware LED/Siren Indication, Signal Meter, Live AT Console
+ * Features        : Power-On Startup Boot Call, 1-Time Call per Alert Type,
+ *                   Cloud API Uplink Integration, Automated Emergency Calls & SMS,
+ *                   Hardware Siren/LED Indication, Local Web Dashboard, Live AT Console
  * ==================================================================== */
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Update.h>
 #include <ArduinoOTA.h>
 
 /* ====================================================================
- * 1. WI-FI & OTA CONFIGURATION
+ * 1. WI-FI & CLOUD CONFIGURATION
  * ==================================================================== */
 const char* WIFI_SSID     = "sakshyam";
 const char* WIFI_PASSWORD = "sakshyam";
@@ -34,6 +38,11 @@ const char* MDNS_HOSTNAME = "esp32-gsm";
 // OTA Credentials (used at /update)
 const char* otaUsername   = "admin";
 const char* otaPassword   = "admin";
+
+// Production Level 1 Cloud Endpoint (per a.md Section 1 & Section 3)
+const char* API_LEVEL1_URL = "https://zenithkandel.com.np/hydra/backend/api/nodes/level1.php";
+const unsigned long CLOUD_POLL_INTERVAL_MS = 1500; // Poll server every 1.5s
+unsigned long lastCloudPollTime = 0;
 
 /* ====================================================================
  * 2. HARDWARE PIN DEFINITIONS & MAPPING
@@ -53,6 +62,11 @@ const char* otaPassword   = "admin";
   #define ALERT_LED_PIN  12  // High-Intensity Strobe Alert LED (GPIO 12)
   #define SIREN_PIN      14  // Siren / Buzzer Control Pin (GPIO 14)
 #endif
+
+// Siren / Buzzer Drive Polarity:
+// Set to 'true' if Buzzer (+) is connected to 3.3V/VCC and (-) to GPIO 14 (Active-LOW: LOW = ON, HIGH = OFF)
+// Set to 'false' if Buzzer (+) is connected to GPIO 14 and (-) to GND (Active-HIGH: HIGH = ON, LOW = OFF)
+#define SIREN_ACTIVE_LOW true
 
 #define GSM_BAUD_RATE 9600
 
@@ -74,6 +88,17 @@ String gsmStatusText = "INITIALIZING MODEM...";
 // Call State
 String activeCallState = "IDLE";
 String lastCalledNumber = "";
+
+// Power-On & 1-Time Alert Dispatch Tracker
+bool bootCallDispatched = false;
+String defaultBootCallNumber = "+9779800000000"; // Power-on notification phone number
+String lastDispatchedAlertType = "";             // Strictly 1 call per alert type tracker
+
+// Cloud Server Sync State
+bool cloudPollConnected = false;
+bool cloudEmergencyActive = false;
+String cloudSirenState = "OFF";
+String cloudBreachSummary = "NOMINAL";
 
 // Alert & LED Indication State
 bool isAlertActive = false;
@@ -156,8 +181,8 @@ void updateHardwareOutputs() {
   }
   digitalWrite(ALERT_LED_PIN, alertLedCurState);
 
-  // 3. Siren Control
-  digitalWrite(SIREN_PIN, sirenActive ? HIGH : LOW);
+  // 3. Siren Control (Active-LOW: LOW = ON, HIGH = OFF)
+  digitalWrite(SIREN_PIN, sirenActive ? (SIREN_ACTIVE_LOW ? LOW : HIGH) : (SIREN_ACTIVE_LOW ? HIGH : LOW));
 }
 
 /* ====================================================================
@@ -204,7 +229,7 @@ String sendATCommand(String cmd, unsigned long timeoutMs = 2000, String expected
 }
 
 /* ====================================================================
- * 6. GSM HARDWARE ROUTINES (CALL, SMS, ALERT DISPATCH)
+ * 6. GSM HARDWARE ROUTINES (CALL, SMS, POWER-ON & ALERT DISPATCH)
  * ==================================================================== */
 
 void queryGsmStatus() {
@@ -256,12 +281,16 @@ void queryGsmStatus() {
     }
   }
 
-  if (gsmNetworkReg == 1) {
-    gsmStatusText = "CONNECTED (HOME NETWORK)";
+  if (gsmNetworkReg == 1 || gsmNetworkReg == 5) {
+    gsmStatusText = (gsmNetworkReg == 1) ? "CONNECTED (HOME NETWORK)" : "CONNECTED (ROAMING)";
     if (!isAlertActive) statusLedMode = STATUS_HEARTBEAT;
-  } else if (gsmNetworkReg == 5) {
-    gsmStatusText = "CONNECTED (ROAMING)";
-    if (!isAlertActive) statusLedMode = STATUS_HEARTBEAT;
+
+    // Power-On Startup Call: Triggers 1-time call when power is turned ON and network connects
+    if (!bootCallDispatched && defaultBootCallNumber.length() > 2) {
+      bootCallDispatched = true;
+      addLog("[POWER-ON BOOT DISPATCH] Power ON detected! Dispatching 1-time startup boot call to " + defaultBootCallNumber);
+      gsmMakeCall(defaultBootCallNumber);
+    }
   } else if (gsmNetworkReg == 2) {
     gsmStatusText = "SEARCHING FOR CELLULAR TOWER...";
     statusLedMode = STATUS_BUSY;
@@ -421,6 +450,8 @@ bool triggerAlert(String node, String level, String msg, String targetNum, bool 
   alertMessage = msg;
   alertStartTime = millis();
 
+  String alertKey = node + ":" + level;
+
   addLog("[ALERT ENGINE] Emergency Alert Triggered! Node: " + node + " | Level: " + level);
 
   if (level == "CRITICAL" || level == "EMERGENCY") {
@@ -437,16 +468,23 @@ bool triggerAlert(String node, String level, String msg, String targetNum, bool 
   bool smsResult = true;
   bool callResult = true;
 
-  if (doSms && targetNum.length() > 2) {
-    String smsContent = "[HYDRA ALERT]\nNODE: " + node + "\nLEVEL: " + level + "\nMSG: " + msg;
-    smsResult = gsmSendSMS(targetNum, smsContent);
+  // Strictly 1-Time Call & SMS per Alert Type!
+  if (alertKey != lastDispatchedAlertType) {
+    if (doSms && targetNum.length() > 2) {
+      String smsContent = "[HYDRA ALERT]\nNODE: " + node + "\nLEVEL: " + level + "\nMSG: " + msg;
+      smsResult = gsmSendSMS(targetNum, smsContent);
+    }
+
+    if (doCall && targetNum.length() > 2) {
+      callResult = gsmMakeCall(targetNum);
+    }
+    lastDispatchedAlertType = alertKey;
+    addLog("[ALERT ENGINE] Dispatched 1-time call/SMS for alert type: " + alertKey);
+  } else {
+    addLog("[ALERT ENGINE] Alert '" + alertKey + "' already dispatched. Skipping duplicate call.");
   }
 
-  if (doCall && targetNum.length() > 2) {
-    callResult = gsmMakeCall(targetNum);
-  }
-
-  lastActionResult = "ALERT DISPATCHED: " + level + " (" + node + ")";
+  lastActionResult = "ALERT ACTIVE: " + level + " (" + node + ")";
   lastActionSuccess = smsResult && callResult;
   lastActionTime = millis();
   return true;
@@ -459,6 +497,7 @@ void clearAlert() {
   alertMessage = "NOMINAL";
   alertLedMode = ALERT_OFF;
   sirenActive = false;
+  lastDispatchedAlertType = ""; // Reset dispatch tracker on clear
 
   if (activeCallState.indexOf("CALL IN PROGRESS") >= 0 || activeCallState.indexOf("DIALING") >= 0) {
     gsmHangupCall();
@@ -467,11 +506,93 @@ void clearAlert() {
   lastActionResult = "ALERT CLEARED / DISARMED";
   lastActionSuccess = true;
   lastActionTime = millis();
-  addLog("[ALERT ENGINE] System disarmed. Hardware outputs restored to standby.");
+  addLog("[ALERT ENGINE] System disarmed. 1-time alert dispatch tracker reset.");
 }
 
 /* ====================================================================
- * 7. EMBEDDED SHARP MONOCHROME WEB DASHBOARD HTML
+ * 7. CLOUD SERVER POLLING ROUTINE (per a.md Section 3)
+ * ==================================================================== */
+void pollLevel1CloudServer() {
+  if (WiFi.status() != WL_CONNECTED || isOperationInProgress) return;
+
+  WiFiClientSecure client;
+  client.setInsecure(); // Bypass SSL certificate verification for production endpoint
+
+  HTTPClient http;
+  if (!http.begin(client, API_LEVEL1_URL)) {
+    cloudPollConnected = false;
+    return;
+  }
+
+  http.setTimeout(2500);
+  int httpCode = http.GET();
+
+  if (httpCode == 200) {
+    cloudPollConnected = true;
+    String payload = http.getString();
+
+    DynamicJsonDocument doc(4096);
+    DeserializationError error = deserializeJson(doc, payload);
+
+    if (!error && doc["status"] == "SUCCESS") {
+      JsonObject data = doc["data"];
+
+      bool emergency = data["emergency"] | false;
+      const char* sirenStr = data["siren"] | "OFF";
+      cloudEmergencyActive = emergency;
+
+      // 1. Siren & Strobe Hardware Control
+      if (emergency || strcmp(sirenStr, "ON") == 0) {
+        isAlertActive = true;
+        alertLevel = "EMERGENCY";
+        alertSourceNode = data["node"] | "LEVEL_1_VILLAGE_MASTER";
+        alertMessage = data["breach_summary"] | "DISASTER ALERT TRIGGERED";
+        alertLedMode = ALERT_STROBE;
+        sirenActive = true;
+
+        String serverAlertType = data["breach_summary"] | "EMERGENCY_DISASTER";
+        String targetPhone = defaultBootCallNumber;
+        if (!data["gsm_receiver_number"].isNull()) {
+          targetPhone = data["gsm_receiver_number"].as<String>();
+        }
+        String smsMsg = alertMessage;
+        if (!data["gsm_message"].isNull()) {
+          smsMsg = data["gsm_message"].as<String>();
+        }
+
+        // Strictly 1-Time Call & SMS per Server Alert Type
+        if (serverAlertType != lastDispatchedAlertType && targetPhone.length() > 2) {
+          addLog("[CLOUD DISPATCH] New Server Alert '" + serverAlertType + "' received. Dispatching 1-time call to " + targetPhone);
+          gsmSendSMS(targetPhone, smsMsg);
+          gsmMakeCall(targetPhone);
+          lastDispatchedAlertType = serverAlertType;
+        }
+      } else {
+        if (isAlertActive && alertSourceNode == "LEVEL_1_VILLAGE_MASTER") {
+          isAlertActive = false;
+          alertLevel = "NONE";
+          alertSourceNode = "NONE";
+          alertMessage = "NOMINAL";
+          alertLedMode = ALERT_OFF;
+          sirenActive = false;
+          lastDispatchedAlertType = ""; // Reset dispatch tracker when server clears emergency
+        }
+      }
+
+      if (data.containsKey("breach_summary") && !data["breach_summary"].isNull()) {
+        cloudBreachSummary = data["breach_summary"].as<String>();
+      } else {
+        cloudBreachSummary = "NOMINAL";
+      }
+    }
+  } else {
+    cloudPollConnected = false;
+  }
+  http.end();
+}
+
+/* ====================================================================
+ * 8. EMBEDDED SHARP MONOCHROME WEB DASHBOARD HTML
  * ==================================================================== */
 const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html lang="en">
@@ -868,9 +989,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
         <div id="val-last-num" class="stat-box-sub">LAST DIALED: --</div>
       </div>
       <div>
-        <div class="stat-box-label">HARDWARE INDICATION</div>
-        <div id="val-led-alert" class="stat-box-value">ALERT LED: OFF</div>
-        <div id="val-led-status" class="stat-box-sub">STATUS: HEARTBEAT | SIREN: OFF</div>
+        <div class="stat-box-label">HYDRA CLOUD UPLINK</div>
+        <div id="val-cloud-status" class="stat-box-value">CONNECTED</div>
+        <div id="val-cloud-breach" class="stat-box-sub">SUMMARY: NOMINAL</div>
       </div>
     </div>
 
@@ -885,7 +1006,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
             <span style="font-size: 10px; color: #888;">/api/alert</span>
           </div>
           <div class="form-group">
-            <label>TARGET EMERGENCY PHONE NUMBER</label>
+            <label>TARGET EMERGENCY PHONE NUMBER (POWER-ON &amp; DISPATCH)</label>
             <input type="tel" id="alert-phone" placeholder="+9779800000000" value="+9779800000000">
           </div>
           <div class="form-group">
@@ -1037,19 +1158,19 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
             <td><strong>Audible Siren / Buzzer</strong></td>
             <td><code>GPIO 14</code></td>
             <td><code>GPIO 6</code></td>
-            <td>5V Active Piezo Siren Relay / Driver</td>
+            <td>Active-LOW Buzzer (+ to 3.3V, - to GPIO 14)</td>
           </tr>
         </tbody>
       </table>
 
       <div style="margin-top: 14px; font-size: 11px; color: #AAA; line-height: 1.6;">
         <strong style="color: #FFF;">Available REST API Endpoints:</strong><br>
-        • <code>GET /api/status</code> or <code>/api/data</code> - Live status JSON (telemetry, signal, call, alert, LED, logs)<br>
+        • <code>GET /api/status</code> or <code>/api/data</code> - Live status JSON (power boot state, 1-time alert tracker, cloud sync, call state, LED)<br>
         • <code>GET /api/call?num=+9779800000000</code> - Initiate cellular voice call<br>
         • <code>GET /api/hangup</code> - Terminate active call<br>
         • <code>GET /api/send-sms?num=+9779800000000&amp;msg=Hello</code> - Send SMS message<br>
-        • <code>GET /api/alert?node=FLOOD-01&amp;level=CRITICAL&amp;msg=Evacuate&amp;num=+9779800000000&amp;call=true&amp;sms=true</code> - Dispatch Emergency Alert<br>
-        • <code>GET /api/alert?clear=true</code> - Disarm / clear emergency alert<br>
+        • <code>GET /api/alert?node=FLOOD-01&amp;level=CRITICAL&amp;msg=Evacuate&amp;num=+9779800000000&amp;call=true&amp;sms=true</code> - Dispatch 1-Time Emergency Alert<br>
+        • <code>GET /api/alert?clear=true</code> - Disarm / clear emergency alert and reset 1-time dispatch tracker<br>
         • <code>GET /api/led?alert=strobe|blink|on|off&amp;status=heartbeat|busy|error&amp;siren=on|off</code> - Direct hardware control
       </div>
     </div>
@@ -1079,6 +1200,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
         document.getElementById('val-call-state').innerText = data.call.state;
         document.getElementById('val-last-num').innerText = "LAST DIALED: " + (data.call.last_number || "--");
 
+        // Cloud Uplink Status
+        document.getElementById('val-cloud-status').innerText = data.cloud.connected ? "ACTIVE UPLINK" : "UPLINK ERROR";
+        document.getElementById('val-cloud-breach').innerText = "SUMMARY: " + (data.cloud.breach_summary || "NOMINAL");
+
         // Alert & LED status
         const alertBadge = document.getElementById('alert-status-badge');
         if (data.alert.active) {
@@ -1088,9 +1213,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
           alertBadge.innerText = "[ STATUS: NORMAL ]";
           alertBadge.className = "badge outline";
         }
-
-        document.getElementById('val-led-alert').innerText = "ALERT LED: " + (data.led.alert_mode || "OFF");
-        document.getElementById('val-led-status').innerText = "STATUS: " + (data.led.status_mode || "HEARTBEAT") + " | SIREN: " + (data.led.siren_active ? "ON" : "OFF");
 
         // Action feedback
         document.getElementById('feedback-text').innerText = data.action.text;
@@ -1243,7 +1365,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 )rawliteral";
 
 /* ====================================================================
- * 8. WEB SERVER HANDLERS & OTA
+ * 9. WEB SERVER HANDLERS & OTA
  * ==================================================================== */
 
 void handleRoot() {
@@ -1258,6 +1380,7 @@ void handleStatus() {
   json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
   json += "\"uptime_sec\":" + String(millis() / 1000) + ",";
   json += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
+  json += "\"boot_call_dispatched\":" + String(bootCallDispatched ? "true" : "false") + ",";
   json += "\"pins\":{";
   json += "\"gsm_rx\":" + String(GSM_RX_PIN) + ",";
   json += "\"gsm_tx\":" + String(GSM_TX_PIN) + ",";
@@ -1265,6 +1388,14 @@ void handleStatus() {
   json += "\"alert_led\":" + String(ALERT_LED_PIN) + ",";
   json += "\"siren\":" + String(SIREN_PIN);
   json += "}";
+  json += "},";
+
+  json += "\"cloud\":{";
+  json += "\"url\":\"" + String(API_LEVEL1_URL) + "\",";
+  json += "\"connected\":" + String(cloudPollConnected ? "true" : "false") + ",";
+  json += "\"emergency\":" + String(cloudEmergencyActive ? "true" : "false") + ",";
+  json += "\"siren\":\"" + cloudSirenState + "\",";
+  json += "\"breach_summary\":\"" + cloudBreachSummary + "\"";
   json += "},";
 
   json += "\"gsm\":{";
@@ -1279,14 +1410,16 @@ void handleStatus() {
 
   json += "\"call\":{";
   json += "\"state\":\"" + activeCallState + "\",";
-  json += "\"last_number\":\"" + lastCalledNumber + "\"";
+  json += "\"last_number\":\"" + lastCalledNumber + "\",";
+  json += "\"boot_target_num\":\"" + defaultBootCallNumber + "\"";
   json += "},";
 
   json += "\"alert\":{";
   json += "\"active\":" + String(isAlertActive ? "true" : "false") + ",";
   json += "\"level\":\"" + alertLevel + "\",";
   json += "\"source_node\":\"" + alertSourceNode + "\",";
-  json += "\"message\":\"" + alertMessage + "\"";
+  json += "\"message\":\"" + alertMessage + "\",";
+  json += "\"last_dispatched_type\":\"" + lastDispatchedAlertType + "\"";
   json += "},";
 
   String alertModeStr = "OFF";
@@ -1369,7 +1502,7 @@ void handleAlert() {
   String node  = server.hasArg("node")  ? server.arg("node")  : "GSM-GATEWAY";
   String level = server.hasArg("level") ? server.arg("level") : "EMERGENCY";
   String msg   = server.hasArg("msg")   ? server.arg("msg")   : "HYDRA Emergency Alert Triggered";
-  String num   = server.hasArg("num")   ? server.arg("num")   : (server.hasArg("number") ? server.arg("number") : "");
+  String num   = server.hasArg("num")   ? server.arg("num")   : (server.hasArg("number") ? server.arg("number") : defaultBootCallNumber);
   bool doCall  = server.hasArg("call")  ? (server.arg("call") == "true" || server.arg("call") == "1") : false;
   bool doSms   = server.hasArg("sms")   ? (server.arg("sms") == "true" || server.arg("sms") == "1")   : false;
 
@@ -1551,7 +1684,7 @@ void handleNotFound() {
 }
 
 /* ====================================================================
- * 9. SETUP & MAIN LOOP
+ * 10. SETUP & MAIN LOOP
  * ==================================================================== */
 
 void setup() {
@@ -1568,7 +1701,7 @@ void setup() {
   pinMode(SIREN_PIN, OUTPUT);
   digitalWrite(STATUS_LED_PIN, LOW);
   digitalWrite(ALERT_LED_PIN, LOW);
-  digitalWrite(SIREN_PIN, LOW);
+  digitalWrite(SIREN_PIN, SIREN_ACTIVE_LOW ? HIGH : LOW);
 
   // Initialize Hardware Serial for GSM Module
   gsmSerial.begin(GSM_BAUD_RATE, SERIAL_8N1, GSM_RX_PIN, GSM_TX_PIN);
@@ -1639,7 +1772,7 @@ void setup() {
   setupWebOTA();
   server.onNotFound(handleNotFound);
   server.begin();
-  Serial.println("[HTTP] Web server listening on port 80 with Alert & LED Endpoints.");
+  Serial.println("[HTTP] Web server listening on port 80 with Power-On & 1-Time Dispatch Logic.");
 
   setupArduinoOTA();
 
@@ -1651,6 +1784,21 @@ void loop() {
   ArduinoOTA.handle();
   updateHardwareOutputs();
 
+  unsigned long now = millis();
+
+  // Poll Production Level 1 Cloud Server Endpoint (per a.md Section 3)
+  if (now - lastCloudPollTime >= CLOUD_POLL_INTERVAL_MS) {
+    lastCloudPollTime = now;
+    pollLevel1CloudServer();
+  }
+
+  // Modem Periodic Check
+  if (now - lastStatusCheck >= STATUS_CHECK_INTERVAL_MS) {
+    lastStatusCheck = now;
+    queryGsmStatus();
+  }
+
+  // Async UART responses from GSM Modem
   while (gsmSerial.available()) {
     String asyncLine = gsmSerial.readStringUntil('\n');
     asyncLine.trim();
@@ -1667,11 +1815,5 @@ void loop() {
         if (!isAlertActive) alertLedMode = ALERT_OFF;
       }
     }
-  }
-
-  unsigned long now = millis();
-  if (now - lastStatusCheck >= STATUS_CHECK_INTERVAL_MS) {
-    lastStatusCheck = now;
-    queryGsmStatus();
   }
 }

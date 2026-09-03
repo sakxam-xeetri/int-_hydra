@@ -67,6 +67,14 @@
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiServer.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiUdp.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/Network/src/NetworkUdp.h \
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/NetworkClientSecure/src/WiFiClientSecure.h \
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/NetworkClientSecure/src/NetworkClientSecure.h \
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/NetworkClientSecure/src/ssl_client.h \
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/HTTPClient/src/HTTPClient.h \
+ C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/NetworkClientSecure/src/NetworkClientSecure.h \
+ .pio/libdeps/esp32_gsm/ArduinoJson/src/ArduinoJson.h \
+ .pio/libdeps/esp32_gsm/ArduinoJson/src/ArduinoJson.hpp \
+ .pio/libdeps/esp32_gsm/ArduinoJson/src/ArduinoJson/Configuration.hpp \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/WebServer.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/FS/src/FS.h \
  C:/Users/ACER/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/HTTP_Method.h \
