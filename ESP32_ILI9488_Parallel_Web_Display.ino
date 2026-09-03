@@ -13,6 +13,9 @@
 #include <ESPmDNS.h>
 #include <Update.h>
 #include <ArduinoOTA.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
 
 /* ====================================================================
  * 1. ILI9488 8-BIT PARALLEL PINS (EXACTLY MATCHING example.ino)
@@ -39,10 +42,18 @@ const uint8_t dataPins[8] = { TFT_D0, TFT_D1, TFT_D2, TFT_D3,
                              TFT_D4, TFT_D5, TFT_D6, TFT_D7 };
 
 /* ====================================================================
- * 2. WI-FI & OTA CREDENTIALS
+ * 2. WI-FI, SERVER FEED & OTA CREDENTIALS
  * ==================================================================== */
 const char* WIFI_SSID     = "sakshyam";
 const char* WIFI_PASSWORD = "sakshyam";
+
+// HYDRA Production Consolidated Telemetry Feed URL (per a.md Section 1 & 4)
+const char* SERVER_FEED_URL = "https://zenithkandel.com.np/hydra/backend/api/telemetry/feed.php";
+// Local Development Fallback
+// const char* SERVER_FEED_URL = "http://192.168.1.100/codes/hydra/backend/api/telemetry/feed.php";
+
+const unsigned long SERVER_POLL_INTERVAL_MS = 2500; // Ingest cadence: 2.5s
+unsigned long lastServerPollTime = 0;
 
 const char* AP_SSID       = "ESP32-TFT-DISPLAY";
 const char* AP_PASSWORD   = "12345678";
@@ -50,6 +61,58 @@ const char* AP_PASSWORD   = "12345678";
 const char* MDNS_HOSTNAME = "tft-display";
 const char* otaUsername   = "admin";
 const char* otaPassword   = "admin";
+
+// Live Server Telemetry Cache (Level 2 City Hub / PEOC Kiosk Mirror)
+struct FloodData {
+  String name = "MODI KHOLA SURGE";
+  String status = "STANDBY";
+  float distCm = 0.0;
+  float waterDepthCm = 0.0;
+  String zone = "WAITING";
+  String hazard = "NOMINAL";
+  String lastSync = "--:--:--";
+} liveFlood;
+
+struct FireData {
+  String name = "PINE RIDGE SENTINEL";
+  String status = "STANDBY";
+  float tempC = 0.0;
+  float humidity = 0.0;
+  float gasPpm = 0.0;
+  String airQuality = "Warming up";
+  String hazard = "NOMINAL";
+  String lastSync = "--:--:--";
+} liveFire;
+
+struct LandslideData {
+  String name = "ANNAPURNA ESCARPMENT";
+  String status = "STANDBY";
+  bool gpsConnected = false;
+  bool gpsFix = false;
+  int satellites = 0;
+  float lat = 0.0;
+  float lng = 0.0;
+  float altM = 0.0;
+  float speedKmh = 0.0;
+  float pitch = 0.0;
+  float roll = 0.0;
+  float accelG = 1.0;
+  String hazard = "NOMINAL";
+  String lastSync = "--:--:--";
+} liveLandslide;
+
+struct SystemSummary {
+  String region = "GHANDRUK BASIN, NEPAL";
+  String overallStatus = "CONNECTING...";
+  String masterStatus = "STANDBY";
+  String gsmStatus = "GSM_ONLINE";
+  bool isEmergency = false;
+  unsigned long lastFetchMillis = 0;
+  int lastHttpCode = 0;
+  unsigned long lastLatencyMs = 0;
+  unsigned long fetchSuccessCount = 0;
+  unsigned long fetchFailCount = 0;
+} liveSummary;
 
 /* ====================================================================
  * 3. DISPLAY CONFIGURATION & RGB565 COLOR MACROS
@@ -78,11 +141,11 @@ uint16_t COLOR_PANEL  = COLOR_DARK_GRAY;
 uint16_t COLOR_BORDER = COLOR_WHITE;
 
 // Display State
-String currentTitle      = "LIFELINE ILI9488";
-String currentMessage    = "System online! Type any message or alert on the web dashboard to stream it directly to this 3.5\" 8-bit parallel TFT display.";
-String currentMode       = "CARD"; // CARD, HUD, ALERT, TEXT
-String currentTheme      = "MONO"; // MONO, CYAN, EMERALD, AMBER
-int    currentFontSize   = 2;      // 1 = Small, 2 = Medium, 3 = Large
+String currentTitle      = "HYDRA PEOC COMMAND KIOSK";
+String currentMessage    = "Live telemetry streaming continuously from https://zenithkandel.com.np/hydra";
+String currentMode       = "KIOSK"; // KIOSK (default live mirror), CARD, HUD, ALERT, TEXT
+String currentTheme      = "MONO";  // MONO, CYAN, EMERALD, AMBER
+int    currentFontSize   = 2;       // 1 = Small, 2 = Medium, 3 = Large
 
 WebServer server(80);
 
@@ -374,10 +437,279 @@ void applyTheme(String themeName) {
 }
 
 /* ====================================================================
+ * 6.5. HYDRA SERVER TELEMETRY INGEST (HTTP/HTTPS GET)
+ * ==================================================================== */
+
+void fetchTelemetryFeed() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  HTTPClient http;
+  http.setTimeout(3500);
+  unsigned long startT = millis();
+  bool isHttps = String(SERVER_FEED_URL).startsWith("https://");
+  int httpCode = 0;
+  String payload = "";
+
+  if (isHttps) {
+    WiFiClientSecure secureClient;
+    secureClient.setInsecure();
+    secureClient.setTimeout(3500);
+    if (http.begin(secureClient, SERVER_FEED_URL)) {
+      httpCode = http.GET();
+      if (httpCode > 0) {
+        payload = http.getString();
+      }
+      http.end();
+    }
+  } else {
+    WiFiClient client;
+    client.setTimeout(3500);
+    if (http.begin(client, SERVER_FEED_URL)) {
+      httpCode = http.GET();
+      if (httpCode > 0) {
+        payload = http.getString();
+      }
+      http.end();
+    }
+  }
+
+  liveSummary.lastLatencyMs = millis() - startT;
+  liveSummary.lastHttpCode = httpCode;
+  liveSummary.lastFetchMillis = millis();
+
+  if (httpCode == 200 && payload.length() > 0) {
+    liveSummary.fetchSuccessCount++;
+    
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (!error) {
+      JsonObject data = doc["data"];
+      liveSummary.region = data["region"].as<const char*>() ? String(data["region"].as<const char*>()) : "ANNAPURNA BASIN";
+      String st = data["alert_summary"]["overall_status"] | "NOMINAL";
+      liveSummary.overallStatus = st;
+      liveSummary.isEmergency = (st == "CRITICAL" || st == "ALERT");
+
+      // Flood Node
+      JsonObject flood = data["nodes"]["flood_node"];
+      if (!flood.isNull()) {
+        liveFlood.status = flood["status"] | "ONLINE";
+        liveFlood.distCm = flood["dist_cm"] | 0.0f;
+        liveFlood.waterDepthCm = flood["water_depth_cm"] | 0.0f;
+        liveFlood.zone = flood["zone"] | "--";
+        liveFlood.hazard = flood["hazard_level"] | "NORMAL";
+        liveFlood.lastSync = flood["last_sync"] | "--";
+      }
+
+      // Fire Node
+      JsonObject fire = data["nodes"]["fire_node"];
+      if (!fire.isNull()) {
+        liveFire.status = fire["status"] | "ONLINE";
+        liveFire.tempC = fire["temperatureC"] | 0.0f;
+        liveFire.humidity = fire["humidity"] | 0.0f;
+        liveFire.gasPpm = fire["gasPPM"] | 0.0f;
+        liveFire.airQuality = fire["air_quality"] | "--";
+        liveFire.hazard = fire["hazard_level"] | "NORMAL";
+        liveFire.lastSync = fire["last_sync"] | "--";
+      }
+
+      // Landslide Node
+      JsonObject landslide = data["nodes"]["landslide_node"];
+      if (!landslide.isNull()) {
+        liveLandslide.status = landslide["status"] | "ONLINE";
+        liveLandslide.hazard = landslide["hazard_level"] | "NORMAL";
+        liveLandslide.lastSync = landslide["last_sync"] | "--";
+
+        JsonObject gps = landslide["gps"];
+        if (!gps.isNull()) {
+          liveLandslide.gpsConnected = gps["connected"] | false;
+          liveLandslide.gpsFix = gps["fix"] | false;
+          liveLandslide.satellites = gps["satellites"] | 0;
+          liveLandslide.lat = gps["lat"] | 0.0f;
+          liveLandslide.lng = gps["lng"] | 0.0f;
+          liveLandslide.altM = gps["alt_m"] | 0.0f;
+          liveLandslide.speedKmh = gps["speed_kmh"] | 0.0f;
+        }
+
+        JsonObject mpu = landslide["mpu"];
+        if (!mpu.isNull()) {
+          liveLandslide.accelG = mpu["total_accel_g"] | 1.0f;
+          liveLandslide.pitch = mpu["pitch"] | 0.0f;
+          liveLandslide.roll = mpu["roll"] | 0.0f;
+        }
+      }
+
+      // Master Node
+      JsonObject master = data["nodes"]["master_node"];
+      if (!master.isNull()) {
+        liveSummary.masterStatus = master["status"] | "ONLINE";
+        liveSummary.gsmStatus = master["cellular_gateway"] | "GSM_ONLINE";
+      }
+
+      Serial.printf("[SERVER] Telemetry Ingest OK (200, %lums): %s | Status: %s\n",
+                    liveSummary.lastLatencyMs, liveSummary.region.c_str(), liveSummary.overallStatus.c_str());
+    } else {
+      Serial.printf("[SERVER] JSON Deserialization error: %s\n", error.c_str());
+    }
+  } else {
+    liveSummary.fetchFailCount++;
+    Serial.printf("[SERVER] Feed fetch failed HTTP %d (%lums)\n", httpCode, liveSummary.lastLatencyMs);
+  }
+}
+
+/* ====================================================================
  * 7. NATIVE ON-SCREEN DASHBOARD RENDER ROUTINES
  * ==================================================================== */
 
+void renderKioskDisplay() {
+  fillScreen(COLOR_BG);
+
+  // 1. TOP HEADER (Y: 0 to 24)
+  fillRect(0, 0, screenWidth, 24, COLOR_PANEL);
+  drawHLine(0, 24, screenWidth, COLOR_BORDER);
+  drawText(8, 7, "HYDRA // PEOC REGIONAL COMMAND KIOSK", COLOR_ACCENT, 1);
+
+  String syncStatus = "SYNC: " + String(liveSummary.lastLatencyMs) + "ms | " + 
+                      (liveSummary.lastHttpCode == 200 ? "200 OK" : ("HTTP " + String(liveSummary.lastHttpCode)));
+  drawText(screenWidth - (syncStatus.length() * 6) - 8, 7, syncStatus.c_str(), 
+           liveSummary.lastHttpCode == 200 ? COLOR_GREEN : COLOR_RED, 1);
+
+  // 2. OVERALL STATUS BANNER (Y: 28 to 54)
+  if (liveSummary.isEmergency) {
+    fillRect(6, 28, screenWidth - 12, 26, COLOR_RED);
+    drawRect(6, 28, screenWidth - 12, 26, COLOR_WHITE);
+    drawTextCentered(34, "! CRITICAL DISASTER ALERT ACTIVE !", COLOR_WHITE, 2);
+  } else {
+    fillRect(6, 28, screenWidth - 12, 26, RGB565(0, 35, 15));
+    drawRect(6, 28, screenWidth - 12, 26, COLOR_GREEN);
+    drawTextCentered(34, "[ ALL STATIONS NOMINAL - BASIN SECURE ]", COLOR_GREEN, 2);
+  }
+
+  // 3. THREE STATION TELEMETRY CARDS (Y: 58 to 242)
+  int cardY = 58;
+  int cardH = 184;
+  int cardW = 152;
+  int gap = 6;
+
+  // --- CARD 1: FLOOD NODE (X: 6) ---
+  int c1X = 6;
+  uint16_t c1Border = (liveFlood.hazard == "CRITICAL" || liveFlood.hazard == "HIGH") ? COLOR_RED : COLOR_CYAN;
+  drawRect(c1X, cardY, cardW, cardH, c1Border);
+  fillRect(c1X + 2, cardY + 2, cardW - 4, 20, COLOR_PANEL);
+  drawHLine(c1X, cardY + 22, cardW, c1Border);
+  drawText(c1X + 6, cardY + 7, "01 // FLOOD GAUGE", COLOR_CYAN, 1);
+  drawText(c1X + cardW - 45, cardY + 7, liveFlood.status.c_str(), 
+           liveFlood.status == "CRITICAL" ? COLOR_RED : COLOR_WHITE, 1);
+
+  drawText(c1X + 8, cardY + 30, "WATER DEPTH:", COLOR_WHITE, 1);
+  String floodDepthStr = String(liveFlood.waterDepthCm, 1) + " cm";
+  drawText(c1X + 8, cardY + 44, floodDepthStr.c_str(), 
+           liveFlood.waterDepthCm > 250 ? COLOR_RED : COLOR_WHITE, 2);
+
+  drawText(c1X + 8, cardY + 74, "CLEARANCE:", COLOR_WHITE, 1);
+  String floodClearStr = String(liveFlood.distCm, 1) + " cm";
+  drawText(c1X + 8, cardY + 88, floodClearStr.c_str(), COLOR_WHITE, 1);
+
+  drawText(c1X + 8, cardY + 110, "RADAR ZONE:", COLOR_WHITE, 1);
+  String zoneTrunc = liveFlood.zone;
+  if (zoneTrunc.length() > 14) zoneTrunc = zoneTrunc.substring(0, 14);
+  drawText(c1X + 8, cardY + 124, zoneTrunc.c_str(), COLOR_CYAN, 1);
+
+  drawText(c1X + 8, cardY + 146, "HAZARD LEVEL:", COLOR_WHITE, 1);
+  drawText(c1X + 8, cardY + 160, liveFlood.hazard.c_str(), 
+           liveFlood.hazard == "CRITICAL" ? COLOR_RED : COLOR_GREEN, 1);
+
+  // --- CARD 2: FIRE & AIR (X: 164) ---
+  int c2X = c1X + cardW + gap;
+  uint16_t c2Border = (liveFire.hazard == "CRITICAL" || liveFire.hazard == "HIGH") ? COLOR_RED : COLOR_AMBER;
+  drawRect(c2X, cardY, cardW, cardH, c2Border);
+  fillRect(c2X + 2, cardY + 2, cardW - 4, 20, COLOR_PANEL);
+  drawHLine(c2X, cardY + 22, cardW, c2Border);
+  drawText(c2X + 6, cardY + 7, "02 // FIRE & AIR", COLOR_AMBER, 1);
+  drawText(c2X + cardW - 45, cardY + 7, liveFire.status.c_str(), COLOR_WHITE, 1);
+
+  drawText(c2X + 8, cardY + 30, "TEMPERATURE:", COLOR_WHITE, 1);
+  String tempStr = String(liveFire.tempC, 1) + " C";
+  drawText(c2X + 8, cardY + 44, tempStr.c_str(), 
+           liveFire.tempC > 45 ? COLOR_RED : COLOR_WHITE, 2);
+
+  drawText(c2X + 8, cardY + 74, "HUMIDITY:", COLOR_WHITE, 1);
+  String humStr = String(liveFire.humidity, 1) + " %";
+  drawText(c2X + 8, cardY + 88, humStr.c_str(), COLOR_WHITE, 1);
+
+  drawText(c2X + 8, cardY + 110, "GAS POLLUTION:", COLOR_WHITE, 1);
+  String gasStr = String(liveFire.gasPpm, 1) + " PPM";
+  drawText(c2X + 8, cardY + 124, gasStr.c_str(), 
+           liveFire.gasPpm > 100 ? COLOR_RED : COLOR_AMBER, 1);
+
+  drawText(c2X + 8, cardY + 146, "AIR QUALITY:", COLOR_WHITE, 1);
+  String airTrunc = liveFire.airQuality;
+  if (airTrunc.length() > 14) airTrunc = airTrunc.substring(0, 14);
+  drawText(c2X + 8, cardY + 160, airTrunc.c_str(), COLOR_WHITE, 1);
+
+  // --- CARD 3: LANDSLIDE & IMU (X: 322) ---
+  int c3X = c2X + cardW + gap;
+  uint16_t c3Border = (liveLandslide.hazard == "CRITICAL" || liveLandslide.hazard == "HIGH") ? COLOR_RED : COLOR_GREEN;
+  drawRect(c3X, cardY, cardW, cardH, c3Border);
+  fillRect(c3X + 2, cardY + 2, cardW - 4, 20, COLOR_PANEL);
+  drawHLine(c3X, cardY + 22, cardW, c3Border);
+  drawText(c3X + 6, cardY + 7, "03 // LANDSLIDE", COLOR_GREEN, 1);
+  drawText(c3X + cardW - 45, cardY + 7, liveLandslide.status.c_str(), COLOR_WHITE, 1);
+
+  drawText(c3X + 8, cardY + 30, "SURFACE ACCEL:", COLOR_WHITE, 1);
+  String accelStr = String(liveLandslide.accelG, 2) + " g";
+  drawText(c3X + 8, cardY + 44, accelStr.c_str(), 
+           liveLandslide.accelG > 1.3 ? COLOR_RED : COLOR_WHITE, 2);
+
+  drawText(c3X + 8, cardY + 74, "INCLINATION:", COLOR_WHITE, 1);
+  String tiltStr = "P:" + String(liveLandslide.pitch, 1) + " R:" + String(liveLandslide.roll, 1);
+  drawText(c3X + 8, cardY + 88, tiltStr.c_str(), COLOR_WHITE, 1);
+
+  drawText(c3X + 8, cardY + 110, "GPS STATUS:", COLOR_WHITE, 1);
+  String gpsStr = String(liveLandslide.satellites) + " Sats " + (liveLandslide.gpsFix ? "[FIX]" : "[SEARCH]");
+  drawText(c3X + 8, cardY + 124, gpsStr.c_str(), 
+           liveLandslide.gpsFix ? COLOR_GREEN : COLOR_AMBER, 1);
+
+  drawText(c3X + 8, cardY + 146, "LOCATION:", COLOR_WHITE, 1);
+  String locStr = String(liveLandslide.lat, 2) + "N " + String(liveLandslide.lng, 2) + "E";
+  drawText(c3X + 8, cardY + 160, locStr.c_str(), COLOR_WHITE, 1);
+
+  // 4. VILLAGE MASTER DISPATCH BAR (Y: 248 to 292)
+  drawRect(6, 248, screenWidth - 12, 46, COLOR_BORDER);
+  fillRect(8, 250, screenWidth - 16, 42, COLOR_PANEL);
+  
+  String sirenStr = "VILLAGE SIREN: " + String(liveSummary.isEmergency ? "ACTIVE ON [ALARM]" : "STANDBY OFF");
+  drawText(14, 256, sirenStr.c_str(), liveSummary.isEmergency ? COLOR_RED : COLOR_GREEN, 1);
+
+  String gsmStr = "GATEWAY: " + liveSummary.gsmStatus;
+  drawText(260, 256, gsmStr.c_str(), COLOR_CYAN, 1);
+
+  String regionStr = "BASIN: " + liveSummary.region;
+  drawText(14, 274, regionStr.c_str(), COLOR_WHITE, 1);
+
+  String uplinkStr = "UPLINKS: " + String(liveSummary.fetchSuccessCount) + " OK";
+  drawText(screenWidth - (uplinkStr.length() * 6) - 14, 274, uplinkStr.c_str(), COLOR_GREEN, 1);
+
+  // 5. FOOTER (Y: 298 to 320)
+  fillRect(0, screenHeight - 22, screenWidth, 22, COLOR_PANEL);
+  drawHLine(0, screenHeight - 23, screenWidth, COLOR_BORDER);
+
+  String ipStr = "IP: " + WiFi.localIP().toString() + " | http://tft-display.local";
+  drawText(8, screenHeight - 15, ipStr.c_str(), COLOR_WHITE, 1);
+
+  char upBuf[32];
+  unsigned long sec = millis() / 1000;
+  snprintf(upBuf, sizeof(upBuf), "UP: %02lu:%02lu:%02lu", sec / 3600, (sec % 3600) / 60, sec % 60);
+  drawText(screenWidth - 85, screenHeight - 15, upBuf, COLOR_ACCENT, 1);
+}
+
 void renderDisplay() {
+  if (currentMode == "KIOSK") {
+    renderKioskDisplay();
+    return;
+  }
+
   fillScreen(COLOR_BG);
 
   // 1. TOP HEADER BAR
@@ -732,17 +1064,46 @@ void handleStatus() {
   json += "\"free_heap\":" + String(ESP.getFreeHeap());
   json += "},";
 
-  json += "\"display\":{";
-  json += "\"title\":\"" + currentTitle + "\",";
-  String escMsg = currentMessage;
-  escMsg.replace("\"", "\\\"");
-  escMsg.replace("\n", "\\n");
-  escMsg.replace("\r", "");
-  json += "\"message\":\"" + escMsg + "\",";
-  json += "\"mode\":\"" + currentMode + "\",";
-  json += "\"theme\":\"" + currentTheme + "\",";
-  json += "\"font_size\":" + String(currentFontSize);
+  json += "\"summary\":{";
+  json += "\"region\":\"" + liveSummary.region + "\",";
+  json += "\"status\":\"" + liveSummary.overallStatus + "\",";
+  json += "\"emergency\":" + String(liveSummary.isEmergency ? "true" : "false") + ",";
+  json += "\"latency_ms\":" + String(liveSummary.lastLatencyMs) + ",";
+  json += "\"http_code\":" + String(liveSummary.lastHttpCode) + ",";
+  json += "\"success_count\":" + String(liveSummary.fetchSuccessCount) + ",";
+  json += "\"fail_count\":" + String(liveSummary.fetchFailCount);
+  json += "},";
+
+  json += "\"flood\":{";
+  json += "\"status\":\"" + liveFlood.status + "\",";
+  json += "\"water_depth_cm\":" + String(liveFlood.waterDepthCm, 1) + ",";
+  json += "\"dist_cm\":" + String(liveFlood.distCm, 1) + ",";
+  json += "\"zone\":\"" + liveFlood.zone + "\",";
+  json += "\"hazard\":\"" + liveFlood.hazard + "\"";
+  json += "},";
+
+  json += "\"fire\":{";
+  json += "\"status\":\"" + liveFire.status + "\",";
+  json += "\"temp_c\":" + String(liveFire.tempC, 1) + ",";
+  json += "\"humidity\":" + String(liveFire.humidity, 1) + ",";
+  json += "\"gas_ppm\":" + String(liveFire.gasPpm, 1) + ",";
+  json += "\"air_quality\":\"" + liveFire.airQuality + "\",";
+  json += "\"hazard\":\"" + liveFire.hazard + "\"";
+  json += "},";
+
+  json += "\"landslide\":{";
+  json += "\"status\":\"" + liveLandslide.status + "\",";
+  json += "\"accel_g\":" + String(liveLandslide.accelG, 2) + ",";
+  json += "\"pitch\":" + String(liveLandslide.pitch, 1) + ",";
+  json += "\"roll\":" + String(liveLandslide.roll, 1) + ",";
+  json += "\"satellites\":" + String(liveLandslide.satellites) + ",";
+  json += "\"gps_fix\":" + String(liveLandslide.gpsFix ? "true" : "false") + ",";
+  json += "\"lat\":" + String(liveLandslide.lat, 4) + ",";
+  json += "\"lng\":" + String(liveLandslide.lng, 4) + ",";
+  json += "\"alt_m\":" + String(liveLandslide.altM, 1) + ",";
+  json += "\"hazard\":\"" + liveLandslide.hazard + "\"";
   json += "}";
+
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -877,14 +1238,36 @@ void setup() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/api/status", HTTP_GET, handleStatus);
   server.on("/api/display", HTTP_GET, handleDisplayUpdate);
+  server.on("/api/refresh", HTTP_GET, []() {
+    fetchTelemetryFeed();
+    renderKioskDisplay();
+    server.send(200, "application/json", "{\"status\":\"REFRESHED\"}");
+  });
   setupWebOTA();
   server.begin();
   Serial.println("[HTTP] Web server listening on port 80.");
 
-  // Render initial dashboard on TFT display
-  renderDisplay();
+  // Fetch initial telemetry and render Kiosk on TFT display
+  if (WiFi.status() == WL_CONNECTED) {
+    drawTextCentered(195, "CONNECTING TO HYDRA CLOUD SERVER...", COLOR_CYAN, 1);
+    fetchTelemetryFeed();
+  }
+  renderKioskDisplay();
 }
 
 void loop() {
   server.handleClient();
+  ArduinoOTA.handle();
+
+  // Periodic Telemetry Ingest & TFT Dashboard Refresh
+  unsigned long now = millis();
+  if (now - lastServerPollTime >= SERVER_POLL_INTERVAL_MS) {
+    lastServerPollTime = now;
+    if (WiFi.status() == WL_CONNECTED) {
+      fetchTelemetryFeed();
+    }
+    if (currentMode == "KIOSK") {
+      renderKioskDisplay();
+    }
+  }
 }
