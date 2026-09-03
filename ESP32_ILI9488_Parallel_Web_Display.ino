@@ -357,10 +357,18 @@ void drawText(int16_t x, int16_t y, const char *text, uint16_t color, uint8_t si
   }
 }
 
+void drawText(int16_t x, int16_t y, const String &text, uint16_t color, uint8_t size) {
+  drawText(x, y, text.c_str(), color, size);
+}
+
 void drawTextCentered(int16_t y, const char *text, uint16_t color, uint8_t size) {
   int16_t x = (screenWidth - strlen(text) * 6 * size) / 2;
   if (x < 0) x = 0;
   drawText(x, y, text, color, size);
+}
+
+void drawTextCentered(int16_t y, const String &text, uint16_t color, uint8_t size) {
+  drawTextCentered(y, text.c_str(), color, size);
 }
 
 void drawWrappedText(int16_t x, int16_t y, int16_t maxW, const String& text, uint16_t color, uint8_t size) {
@@ -562,7 +570,58 @@ void fetchTelemetryFeed() {
  * 7. NATIVE ON-SCREEN DASHBOARD RENDER ROUTINES
  * ==================================================================== */
 
-void renderKioskDisplay() {
+enum DisplayState {
+  STATE_BOOT,
+  STATE_NORMAL,
+  STATE_ALERT
+};
+
+DisplayState currentScreenState = STATE_BOOT;
+
+// 7.1. HYDRA SYSTEM BOOT UP SEQUENCE (Splash & Progress Bar)
+void renderBootScreen(int progressPct, const char* statusMsg) {
+  fillScreen(COLOR_BLACK);
+
+  // Outer framing
+  drawRect(10, 10, screenWidth - 20, screenHeight - 20, COLOR_CYAN);
+  drawRect(12, 12, screenWidth - 24, screenHeight - 24, COLOR_WHITE);
+
+  // Stylized Title block
+  fillRect(16, 20, screenWidth - 32, 65, RGB565(10, 20, 35));
+  drawRect(16, 20, screenWidth - 32, 65, COLOR_CYAN);
+  drawTextCentered(30, "H Y D R A", COLOR_WHITE, 3);
+  drawTextCentered(58, "AUTONOMOUS DISASTER WARNING NETWORK", COLOR_CYAN, 1);
+
+  // System Specs Diagnostics
+  drawText(30, 98,  "> HARDWARE: ARDUINO NANO ESP32 (ESP32-S3)", COLOR_WHITE, 1);
+  drawText(30, 115, "> DISPLAY : 3.5\" ILI9488 IPS (8-BIT PARALLEL BUS)", COLOR_WHITE, 1);
+  drawText(30, 132, "> NETWORK : IEEE 802.11 b/g/n [sakshyam]", COLOR_WHITE, 1);
+  drawText(30, 149, "> GATEWAY : LEVEL 2 REGIONAL PEOC COMMAND KIOSK", COLOR_CYAN, 1);
+  drawText(30, 166, "> SERVER  : https://zenithkandel.com.np/hydra", COLOR_WHITE, 1);
+
+  // Progress Bar Frame
+  drawRect(30, 195, screenWidth - 60, 24, COLOR_WHITE);
+  fillRect(32, 197, screenWidth - 64, 20, COLOR_BLACK);
+
+  // Progress Bar Fill
+  int fillW = (int)((screenWidth - 68) * (progressPct / 100.0f));
+  if (fillW > 0) {
+    fillRect(34, 199, fillW, 16, COLOR_CYAN);
+  }
+
+  // Status message below bar
+  char pctBuf[16];
+  snprintf(pctBuf, sizeof(pctBuf), "%d%%", progressPct);
+  drawText(30, 228, statusMsg, COLOR_WHITE, 1);
+  drawText(screenWidth - 65, 228, pctBuf, COLOR_CYAN, 1);
+
+  // Microcontroller & Firmware info
+  drawTextCentered(265, "POKHARA EMERGENCY OPERATIONS CENTER - DISASTER RADAR", COLOR_DARK_GRAY, 1);
+  drawTextCentered(282, "INITIALIZING PEOC TELEMETRY ENGINE & FIRMWARE V2.4", COLOR_DARK_GRAY, 1);
+}
+
+// 7.2. NORMAL DATA SCREEN (Displays All Stations When Nominal)
+void renderNormalDataScreen() {
   fillScreen(COLOR_BG);
 
   // 1. TOP HEADER (Y: 0 to 24)
@@ -575,16 +634,10 @@ void renderKioskDisplay() {
   drawText(screenWidth - (syncStatus.length() * 6) - 8, 7, syncStatus.c_str(), 
            liveSummary.lastHttpCode == 200 ? COLOR_GREEN : COLOR_RED, 1);
 
-  // 2. OVERALL STATUS BANNER (Y: 28 to 54)
-  if (liveSummary.isEmergency) {
-    fillRect(6, 28, screenWidth - 12, 26, COLOR_RED);
-    drawRect(6, 28, screenWidth - 12, 26, COLOR_WHITE);
-    drawTextCentered(34, "! CRITICAL DISASTER ALERT ACTIVE !", COLOR_WHITE, 2);
-  } else {
-    fillRect(6, 28, screenWidth - 12, 26, RGB565(0, 35, 15));
-    drawRect(6, 28, screenWidth - 12, 26, COLOR_GREEN);
-    drawTextCentered(34, "[ ALL STATIONS NOMINAL - BASIN SECURE ]", COLOR_GREEN, 2);
-  }
+  // 2. NOMINAL STATUS BANNER (Y: 28 to 54)
+  fillRect(6, 28, screenWidth - 12, 26, RGB565(0, 35, 15));
+  drawRect(6, 28, screenWidth - 12, 26, COLOR_GREEN);
+  drawTextCentered(34, "[ ALL STATIONS NOMINAL - BASIN SECURE ]", COLOR_GREEN, 2);
 
   // 3. THREE STATION TELEMETRY CARDS (Y: 58 to 242)
   int cardY = 58;
@@ -594,18 +647,15 @@ void renderKioskDisplay() {
 
   // --- CARD 1: FLOOD NODE (X: 6) ---
   int c1X = 6;
-  uint16_t c1Border = (liveFlood.hazard == "CRITICAL" || liveFlood.hazard == "HIGH") ? COLOR_RED : COLOR_CYAN;
-  drawRect(c1X, cardY, cardW, cardH, c1Border);
+  drawRect(c1X, cardY, cardW, cardH, COLOR_CYAN);
   fillRect(c1X + 2, cardY + 2, cardW - 4, 20, COLOR_PANEL);
-  drawHLine(c1X, cardY + 22, cardW, c1Border);
+  drawHLine(c1X, cardY + 22, cardW, COLOR_CYAN);
   drawText(c1X + 6, cardY + 7, "01 // FLOOD GAUGE", COLOR_CYAN, 1);
-  drawText(c1X + cardW - 45, cardY + 7, liveFlood.status.c_str(), 
-           liveFlood.status == "CRITICAL" ? COLOR_RED : COLOR_WHITE, 1);
+  drawText(c1X + cardW - 45, cardY + 7, liveFlood.status.c_str(), COLOR_WHITE, 1);
 
   drawText(c1X + 8, cardY + 30, "WATER DEPTH:", COLOR_WHITE, 1);
   String floodDepthStr = String(liveFlood.waterDepthCm, 1) + " cm";
-  drawText(c1X + 8, cardY + 44, floodDepthStr.c_str(), 
-           liveFlood.waterDepthCm > 250 ? COLOR_RED : COLOR_WHITE, 2);
+  drawText(c1X + 8, cardY + 44, floodDepthStr.c_str(), COLOR_WHITE, 2);
 
   drawText(c1X + 8, cardY + 74, "CLEARANCE:", COLOR_WHITE, 1);
   String floodClearStr = String(liveFlood.distCm, 1) + " cm";
@@ -617,22 +667,19 @@ void renderKioskDisplay() {
   drawText(c1X + 8, cardY + 124, zoneTrunc.c_str(), COLOR_CYAN, 1);
 
   drawText(c1X + 8, cardY + 146, "HAZARD LEVEL:", COLOR_WHITE, 1);
-  drawText(c1X + 8, cardY + 160, liveFlood.hazard.c_str(), 
-           liveFlood.hazard == "CRITICAL" ? COLOR_RED : COLOR_GREEN, 1);
+  drawText(c1X + 8, cardY + 160, liveFlood.hazard.c_str(), COLOR_GREEN, 1);
 
   // --- CARD 2: FIRE & AIR (X: 164) ---
   int c2X = c1X + cardW + gap;
-  uint16_t c2Border = (liveFire.hazard == "CRITICAL" || liveFire.hazard == "HIGH") ? COLOR_RED : COLOR_AMBER;
-  drawRect(c2X, cardY, cardW, cardH, c2Border);
+  drawRect(c2X, cardY, cardW, cardH, COLOR_AMBER);
   fillRect(c2X + 2, cardY + 2, cardW - 4, 20, COLOR_PANEL);
-  drawHLine(c2X, cardY + 22, cardW, c2Border);
+  drawHLine(c2X, cardY + 22, cardW, COLOR_AMBER);
   drawText(c2X + 6, cardY + 7, "02 // FIRE & AIR", COLOR_AMBER, 1);
   drawText(c2X + cardW - 45, cardY + 7, liveFire.status.c_str(), COLOR_WHITE, 1);
 
   drawText(c2X + 8, cardY + 30, "TEMPERATURE:", COLOR_WHITE, 1);
   String tempStr = String(liveFire.tempC, 1) + " C";
-  drawText(c2X + 8, cardY + 44, tempStr.c_str(), 
-           liveFire.tempC > 45 ? COLOR_RED : COLOR_WHITE, 2);
+  drawText(c2X + 8, cardY + 44, tempStr.c_str(), COLOR_WHITE, 2);
 
   drawText(c2X + 8, cardY + 74, "HUMIDITY:", COLOR_WHITE, 1);
   String humStr = String(liveFire.humidity, 1) + " %";
@@ -640,8 +687,7 @@ void renderKioskDisplay() {
 
   drawText(c2X + 8, cardY + 110, "GAS POLLUTION:", COLOR_WHITE, 1);
   String gasStr = String(liveFire.gasPpm, 1) + " PPM";
-  drawText(c2X + 8, cardY + 124, gasStr.c_str(), 
-           liveFire.gasPpm > 100 ? COLOR_RED : COLOR_AMBER, 1);
+  drawText(c2X + 8, cardY + 124, gasStr.c_str(), COLOR_AMBER, 1);
 
   drawText(c2X + 8, cardY + 146, "AIR QUALITY:", COLOR_WHITE, 1);
   String airTrunc = liveFire.airQuality;
@@ -650,17 +696,15 @@ void renderKioskDisplay() {
 
   // --- CARD 3: LANDSLIDE & IMU (X: 322) ---
   int c3X = c2X + cardW + gap;
-  uint16_t c3Border = (liveLandslide.hazard == "CRITICAL" || liveLandslide.hazard == "HIGH") ? COLOR_RED : COLOR_GREEN;
-  drawRect(c3X, cardY, cardW, cardH, c3Border);
+  drawRect(c3X, cardY, cardW, cardH, COLOR_GREEN);
   fillRect(c3X + 2, cardY + 2, cardW - 4, 20, COLOR_PANEL);
-  drawHLine(c3X, cardY + 22, cardW, c3Border);
+  drawHLine(c3X, cardY + 22, cardW, COLOR_GREEN);
   drawText(c3X + 6, cardY + 7, "03 // LANDSLIDE", COLOR_GREEN, 1);
   drawText(c3X + cardW - 45, cardY + 7, liveLandslide.status.c_str(), COLOR_WHITE, 1);
 
   drawText(c3X + 8, cardY + 30, "SURFACE ACCEL:", COLOR_WHITE, 1);
   String accelStr = String(liveLandslide.accelG, 2) + " g";
-  drawText(c3X + 8, cardY + 44, accelStr.c_str(), 
-           liveLandslide.accelG > 1.3 ? COLOR_RED : COLOR_WHITE, 2);
+  drawText(c3X + 8, cardY + 44, accelStr.c_str(), COLOR_WHITE, 2);
 
   drawText(c3X + 8, cardY + 74, "INCLINATION:", COLOR_WHITE, 1);
   String tiltStr = "P:" + String(liveLandslide.pitch, 1) + " R:" + String(liveLandslide.roll, 1);
@@ -668,8 +712,7 @@ void renderKioskDisplay() {
 
   drawText(c3X + 8, cardY + 110, "GPS STATUS:", COLOR_WHITE, 1);
   String gpsStr = String(liveLandslide.satellites) + " Sats " + (liveLandslide.gpsFix ? "[FIX]" : "[SEARCH]");
-  drawText(c3X + 8, cardY + 124, gpsStr.c_str(), 
-           liveLandslide.gpsFix ? COLOR_GREEN : COLOR_AMBER, 1);
+  drawText(c3X + 8, cardY + 124, gpsStr.c_str(), liveLandslide.gpsFix ? COLOR_GREEN : COLOR_AMBER, 1);
 
   drawText(c3X + 8, cardY + 146, "LOCATION:", COLOR_WHITE, 1);
   String locStr = String(liveLandslide.lat, 2) + "N " + String(liveLandslide.lng, 2) + "E";
@@ -679,8 +722,8 @@ void renderKioskDisplay() {
   drawRect(6, 248, screenWidth - 12, 46, COLOR_BORDER);
   fillRect(8, 250, screenWidth - 16, 42, COLOR_PANEL);
   
-  String sirenStr = "VILLAGE SIREN: " + String(liveSummary.isEmergency ? "ACTIVE ON [ALARM]" : "STANDBY OFF");
-  drawText(14, 256, sirenStr.c_str(), liveSummary.isEmergency ? COLOR_RED : COLOR_GREEN, 1);
+  String sirenStr = "VILLAGE SIREN: [ STANDBY OFF ]";
+  drawText(14, 256, sirenStr.c_str(), COLOR_GREEN, 1);
 
   String gsmStr = "GATEWAY: " + liveSummary.gsmStatus;
   drawText(260, 256, gsmStr.c_str(), COLOR_CYAN, 1);
@@ -704,80 +747,106 @@ void renderKioskDisplay() {
   drawText(screenWidth - 85, screenHeight - 15, upBuf, COLOR_ACCENT, 1);
 }
 
-void renderDisplay() {
-  if (currentMode == "KIOSK") {
-    renderKioskDisplay();
-    return;
+// 7.3. EMERGENCY ALERT POP-UP OVERLAY SCREEN (Triggered On Breach)
+void renderAlertPopUpScreen() {
+  fillScreen(COLOR_BLACK);
+
+  // Flashing strobe double border
+  static bool strobe = false;
+  strobe = !strobe;
+  uint16_t strobeColor = strobe ? COLOR_RED : COLOR_AMBER;
+  drawRect(0, 0, screenWidth, screenHeight, strobeColor);
+  drawRect(2, 2, screenWidth - 4, screenHeight - 4, strobeColor);
+
+  // 1. TOP DANGER HEADER BANNER (Y: 6 to 52)
+  fillRect(6, 6, screenWidth - 12, 46, COLOR_RED);
+  drawRect(6, 6, screenWidth - 12, 46, COLOR_WHITE);
+  drawTextCentered(14, "! CRITICAL DISASTER EMERGENCY ALERT !", COLOR_WHITE, 2);
+  drawTextCentered(34, "IMMEDIATE EVACUATION & DEFENSE PROTOCOL ACTIVE", COLOR_WHITE, 1);
+
+  // 2. CENTRAL ALERT POP-UP MODAL BOX (X: 12, Y: 58, W: 456, H: 176)
+  fillRect(12, 58, screenWidth - 24, 176, RGB565(30, 0, 0));
+  drawRect(12, 58, screenWidth - 24, 176, COLOR_RED);
+  drawRect(14, 60, screenWidth - 28, 172, COLOR_RED);
+
+  drawText(24, 68, ">> ACTIVE EMERGENCY BREACH DIAGNOSTICS:", COLOR_WHITE, 1);
+  drawHLine(24, 80, screenWidth - 48, COLOR_RED);
+
+  int lineY = 88;
+  // Flood breach line
+  if (liveFlood.hazard == "CRITICAL" || liveFlood.hazard == "HIGH" || liveFlood.waterDepthCm > 200) {
+    String fMsg = "! FLOOD SURGE BREACH: WATER DEPTH " + String(liveFlood.waterDepthCm, 1) + " cm (CRITICAL OVERFLOW)";
+    drawText(24, lineY, fMsg.c_str(), COLOR_RED, 1);
+    lineY += 16;
   }
 
-  fillScreen(COLOR_BG);
+  // Landslide breach line
+  if (liveLandslide.hazard == "CRITICAL" || liveLandslide.hazard == "HIGH" || liveLandslide.accelG > 1.2 || abs(liveLandslide.pitch) > 3.0) {
+    String lMsg = "! LANDSLIDE DETECTED: ACCEL " + String(liveLandslide.accelG, 2) + "g | TILT P:" + String(liveLandslide.pitch, 1) + " R:" + String(liveLandslide.roll, 1);
+    drawText(24, lineY, lMsg.c_str(), COLOR_RED, 1);
+    lineY += 16;
+  }
 
-  // 1. TOP HEADER BAR
-  fillRect(0, 0, screenWidth, 26, COLOR_PANEL);
-  drawHLine(0, 26, screenWidth, COLOR_BORDER);
-  drawText(10, 8, "ILI9488 3.5\" TFT [8-BIT PARALLEL]", COLOR_ACCENT, 1);
+  // Fire breach line
+  if (liveFire.hazard == "CRITICAL" || liveFire.hazard == "HIGH" || liveFire.gasPpm > 100 || liveFire.tempC > 40) {
+    String frMsg = "! FIRE / GAS HAZARD: " + String(liveFire.gasPpm, 1) + " PPM | TEMP: " + String(liveFire.tempC, 1) + " C";
+    drawText(24, lineY, frMsg.c_str(), COLOR_RED, 1);
+    lineY += 16;
+  }
 
-  String ipInfo = "IP: " + (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString());
-  drawText(screenWidth - (ipInfo.length() * 6) - 10, 8, ipInfo.c_str(), COLOR_WHITE, 1);
+  if (lineY == 88) {
+    drawText(24, lineY, "! GENERAL PEOC ALARM DISPATCH TRIGGERED FROM SERVER !", COLOR_RED, 1);
+    lineY += 16;
+  }
 
-  // 2. BOTTOM FOOTER BAR
+  drawHLine(24, 138, screenWidth - 48, COLOR_DARK_GRAY);
+
+  // Hardware Dispatch Actions
+  drawText(24, 146, "VILLAGE SIREN : [ ! RELAY TRIGGERED - RUNNING CONTINUOUSLY ! ]", COLOR_WHITE, 1);
+  drawText(24, 162, "CELLULAR SMS  : [ ALERT DISPATCHED VIA SIM800L CELLULAR NET ]", COLOR_CYAN, 1);
+  drawText(24, 178, "TARGET REGION : " + liveSummary.region, COLOR_WHITE, 1);
+  drawText(24, 194, "ACTION ORDER  : EVACUATE TO DESIGNATED HIGH GROUND IMMEDIATELY", COLOR_AMBER, 1);
+  drawText(24, 210, "EMERGENCY SAR : ARMED POLICE FORCE (1114) / RED CROSS (1130)", COLOR_GREEN, 1);
+
+  // 3. LIVE SENSOR MINI-STRIP (Y: 240 to 288)
+  drawRect(12, 240, screenWidth - 24, 48, COLOR_BORDER);
+  fillRect(14, 242, screenWidth - 28, 44, COLOR_PANEL);
+
+  String fStrip = "FLOOD: " + String(liveFlood.waterDepthCm, 1) + "cm";
+  drawText(20, 249, fStrip.c_str(), liveFlood.hazard == "CRITICAL" ? COLOR_RED : COLOR_WHITE, 1);
+
+  String frStrip = "TEMP: " + String(liveFire.tempC, 1) + "C | GAS: " + String(liveFire.gasPpm, 0) + "PPM";
+  drawText(160, 249, frStrip.c_str(), liveFire.hazard == "CRITICAL" ? COLOR_RED : COLOR_WHITE, 1);
+
+  String lStrip = "IMU: " + String(liveLandslide.accelG, 2) + "g | " + String(liveLandslide.satellites) + "Sats";
+  drawText(330, 249, lStrip.c_str(), liveLandslide.hazard == "CRITICAL" ? COLOR_RED : COLOR_WHITE, 1);
+
+  String subStrip = "PEOC COMMAND KIOSK • SERVER UPLINK: " + String(liveSummary.lastLatencyMs) + "ms • HTTP " + String(liveSummary.lastHttpCode);
+  drawText(20, 269, subStrip.c_str(), COLOR_CYAN, 1);
+
+  // 4. FOOTER (Y: 294 to 320)
   fillRect(0, screenHeight - 22, screenWidth, 22, COLOR_PANEL);
   drawHLine(0, screenHeight - 23, screenWidth, COLOR_BORDER);
 
-  String statusText = "LAYOUT: " + currentMode + " | THEME: " + currentTheme;
-  drawText(10, screenHeight - 15, statusText.c_str(), COLOR_WHITE, 1);
+  String alertFooter = "ALERT OVERLAY ACTIVE • AUTO-DISMISSES WHEN ALL HAZARDS CLEAR";
+  drawText(10, screenHeight - 15, alertFooter.c_str(), COLOR_WHITE, 1);
 
-  char uptimeBuf[32];
-  unsigned long s = millis() / 1000;
-  snprintf(uptimeBuf, sizeof(uptimeBuf), "UP: %02lu:%02lu:%02lu", s / 3600, (s % 3600) / 60, s % 60);
-  drawText(screenWidth - 95, screenHeight - 15, uptimeBuf, COLOR_ACCENT, 1);
+  char upBuf[32];
+  unsigned long sec = millis() / 1000;
+  snprintf(upBuf, sizeof(upBuf), "UP: %02lu:%02lu:%02lu", sec / 3600, (sec % 3600) / 60, sec % 60);
+  drawText(screenWidth - 85, screenHeight - 15, upBuf, COLOR_ACCENT, 1);
+}
 
-  // 3. MAIN CONTENT BASED ON LAYOUT MODE
-  if (currentMode == "ALERT") {
-    drawRect(10, 36, screenWidth - 20, screenHeight - 68, COLOR_BORDER);
-    drawRect(12, 38, screenWidth - 24, screenHeight - 72, COLOR_BORDER);
-    fillRect(16, 42, screenWidth - 32, 36, COLOR_BORDER);
-    drawTextCentered(52, "! EMERGENCY ALERT NOTICE !", COLOR_BG, 2);
-    drawWrappedText(24, 96, screenWidth - 48, currentMessage, COLOR_FG, currentFontSize);
+void renderDisplay() {
+  bool isAlert = liveSummary.isEmergency || 
+                 (liveFlood.hazard == "CRITICAL" || liveFlood.hazard == "HIGH") ||
+                 (liveLandslide.hazard == "CRITICAL" || liveLandslide.hazard == "HIGH") ||
+                 (liveFire.hazard == "CRITICAL" || liveFire.hazard == "HIGH");
 
-  } else if (currentMode == "HUD") {
-    int cardW = (screenWidth - 30) / 2;
-
-    drawRect(10, 36, cardW, 110, COLOR_BORDER);
-    fillRect(12, 38, cardW - 4, 106, COLOR_PANEL);
-    drawText(20, 46, "[ WI-FI NETWORK ]", COLOR_ACCENT, 1);
-    drawText(20, 68, WiFi.status() == WL_CONNECTED ? WIFI_SSID : AP_SSID, COLOR_WHITE, 2);
-    String rssiStr = "RSSI: " + String(WiFi.RSSI()) + " dBm";
-    drawText(20, 102, rssiStr.c_str(), COLOR_WHITE, 1);
-    String gwStr = "GATEWAY: " + WiFi.gatewayIP().toString();
-    drawText(20, 120, gwStr.c_str(), COLOR_WHITE, 1);
-
-    drawRect(screenWidth - 10 - cardW, 36, cardW, 110, COLOR_BORDER);
-    fillRect(screenWidth - 8 - cardW, 38, cardW - 4, 106, COLOR_PANEL);
-    drawText(screenWidth - cardW, 46, "[ SYSTEM HEALTH ]", COLOR_ACCENT, 1);
-    String heapStr = String(ESP.getFreeHeap() / 1024) + " KB FREE";
-    drawText(screenWidth - cardW, 68, heapStr.c_str(), COLOR_WHITE, 2);
-    String cpuStr = "CPU FREQ: " + String(ESP.getCpuFreqMHz()) + " MHz";
-    drawText(screenWidth - cardW, 102, cpuStr.c_str(), COLOR_WHITE, 1);
-    drawText(screenWidth - cardW, 120, "BUS: 8-BIT PARALLEL", COLOR_WHITE, 1);
-
-    drawRect(10, 156, screenWidth - 20, screenHeight - 188, COLOR_BORDER);
-    fillRect(12, 158, screenWidth - 24, screenHeight - 192, COLOR_PANEL);
-    drawText(22, 166, "[ ACTIVE BROADCAST ]", COLOR_ACCENT, 1);
-    drawWrappedText(22, 186, screenWidth - 44, currentMessage, COLOR_WHITE, currentFontSize);
-
-  } else if (currentMode == "TEXT") {
-    drawText(14, 36, "> SYSTEM TERMINAL STREAM:", COLOR_ACCENT, 1);
-    drawHLine(14, 48, screenWidth - 28, COLOR_BORDER);
-    drawWrappedText(14, 58, screenWidth - 28, currentMessage, COLOR_FG, currentFontSize);
-
+  if (isAlert) {
+    renderAlertPopUpScreen();
   } else {
-    drawRect(10, 36, screenWidth - 20, screenHeight - 68, COLOR_BORDER);
-    fillRect(12, 38, screenWidth - 24, screenHeight - 72, COLOR_PANEL);
-    fillRect(12, 38, screenWidth - 24, 38, COLOR_BG);
-    drawHLine(12, 76, screenWidth - 24, COLOR_BORDER);
-    drawText(24, 48, currentTitle.c_str(), COLOR_ACCENT, 2);
-    drawWrappedText(24, 96, screenWidth - 48, currentMessage, COLOR_WHITE, currentFontSize);
+    renderNormalDataScreen();
   }
 }
 
@@ -848,128 +917,72 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     
     <header>
       <div class="title-group">
-        <h1>ILI9488 // 8-BIT PARALLEL DISPLAY</h1>
-        <p>3.5" IPS PANEL &bull; 8-BIT DIRECT BUS &bull; WEB DISPATCHER</p>
+        <h1>HYDRA // PEOC COMMAND KIOSK</h1>
+        <p>3.5" IPS PANEL &bull; 8-BIT DIRECT PARALLEL BUS &bull; TELEMETRY MIRROR</p>
       </div>
       <div class="badges">
-        <span class="badge solid"><span class="pulse"></span> TFT 8-BIT BUS OK</span>
-        <span id="active-mode-badge" class="badge outline">LAYOUT: CARD</span>
+        <span class="badge solid"><span class="pulse"></span> LIVE COMMS</span>
+        <a href="/api/refresh" class="badge link">&#128260; REFRESH</a>
         <a href="/update" class="badge link">&#9889; WEB OTA</a>
       </div>
     </header>
 
     <div class="preview-card">
       <div class="preview-label">
-        <span>3.5" TFT SCREEN HARDWARE OUTPUT</span>
-        <span id="render-status">STATUS: SYNCHRONIZED</span>
+        <span>CURRENT SYSTEM STATUS</span>
+        <span id="sys-status-badge">ONLINE</span>
       </div>
       <div class="screen-mock">
-        <h2 id="prev-title">TITLE PREVIEW</h2>
-        <p id="prev-msg">Message preview...</p>
+        <h2 id="modal-title">HYDRA DISASTER COMMAND ACTIVE</h2>
+        <p id="modal-desc">Streaming live telemetry from all Level 0 nodes...</p>
       </div>
     </div>
 
+    <!-- LIVE STATIONS TABLE -->
     <div class="section-title">
-      <span>01 // BROADCAST MESSAGE TO DISPLAY</span>
-      <span>WEB SENDER</span>
-    </div>
-
-    <div class="form-panel">
-      <form id="tft-form" onsubmit="event.preventDefault(); submitContent();">
-        <div class="form-group">
-          <label for="input-title">HEADLINE / CARD TITLE:</label>
-          <input type="text" id="input-title" value="LIFELINE EMERGENCY SYSTEM" required>
-        </div>
-
-        <div class="form-group">
-          <label for="input-msg">MESSAGE TEXT / PARAGRAPH (RENDERED DIRECTLY TO TFT):</label>
-          <textarea id="input-msg" placeholder="Type anything to render onto the ILI9488 display..." required>Broadcasting alert message. All sensors operational. 8-Bit parallel bus connected.</textarea>
-        </div>
-
-        <div class="ctrl-row">
-          <div>
-            <label for="select-mode">SCREEN LAYOUT MODE:</label>
-            <select id="select-mode">
-              <option value="CARD">CARD &amp; BANNER (DEFAULT)</option>
-              <option value="HUD">SYSTEM TELEMETRY HUD</option>
-              <option value="ALERT">INVERTED ALERT BOX</option>
-              <option value="TEXT">TERMINAL TEXT STREAM</option>
-            </select>
-          </div>
-
-          <div>
-            <label for="select-theme">COLOR THEME:</label>
-            <select id="select-theme">
-              <option value="MONO">STARK MONOCHROME (PURE B&amp;W)</option>
-              <option value="CYAN">ELECTRIC CYAN &amp; NAVY</option>
-              <option value="EMERALD">CYBER EMERALD GREEN</option>
-              <option value="AMBER">MATRIX AMBER GOLD</option>
-            </select>
-          </div>
-
-          <div>
-            <label for="select-font">FONT SIZE:</label>
-            <select id="select-font">
-              <option value="1">SMALL (COMPACT)</option>
-              <option value="2" selected>MEDIUM (BALANCED)</option>
-              <option value="3">LARGE (HEADLINE)</option>
-            </select>
-          </div>
-
-          <div>
-            <label for="select-rot">ROTATION:</label>
-            <select id="select-rot">
-              <option value="1" selected>LANDSCAPE (480x320)</option>
-              <option value="0">PORTRAIT (320x480)</option>
-            </select>
-          </div>
-        </div>
-
-        <div style="font-size: 10px; color: #888; text-transform: uppercase; margin-bottom: 4px;">QUICK PRESETS:</div>
-        <div class="preset-chips">
-          <span class="chip" onclick="setPreset('WELCOME SAKSHYAM', 'ILI9488 3.5 parallel screen initialized successfully.', 'CARD', 'CYAN')">WELCOME NOTICE</span>
-          <span class="chip" onclick="setPreset('CRITICAL ALERT', 'Warning: High distance breach detected in sector A.', 'ALERT', 'AMBER')">SECURITY ALERT</span>
-          <span class="chip" onclick="setPreset('SYSTEM STATUS', 'Free heap: 280KB. Wi-Fi connected to sakshyam. Zero errors.', 'HUD', 'EMERALD')">SYSTEM HEALTH</span>
-          <span class="chip" onclick="setPreset('TERMINAL LOG', 'Boot sequence done. 8-Bit bus active on RST:18 CS:19 RS:21 WR:22 RD:23.', 'TEXT', 'MONO')">TERMINAL LOG</span>
-        </div>
-
-        <div class="btn-row">
-          <button type="submit" class="btn">[ &#9654; RENDER ON TFT DISPLAY ]</button>
-          <button type="button" class="btn outline" onclick="clearDisplay()">[ CLEAR DISPLAY ]</button>
-        </div>
-      </form>
-    </div>
-
-    <div class="section-title">
-      <span>02 // HARDWARE PINOUT &amp; DIAGNOSTICS</span>
-      <span>REFERENCE: example.ino</span>
+      <span>01 // REAL-TIME STATION TELEMETRY</span>
+      <span id="last-sync-tag">SYNCING...</span>
     </div>
 
     <div class="table-container">
       <table>
         <thead>
           <tr>
-            <th>IP ADDRESS</th>
-            <th>WI-FI RSSI</th>
-            <th>UPTIME</th>
-            <th>CONTROL PINS</th>
-            <th>DATA BUS (D0..D7)</th>
+            <th>STATION</th>
+            <th>STATUS</th>
+            <th>PRIMARY METRIC</th>
+            <th>SECONDARY METRIC</th>
+            <th>HAZARD LEVEL</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody id="telemetry-table-body">
           <tr>
-            <td id="sys-ip" class="num">---.---.---.---</td>
-            <td id="sys-rssi" class="num">-- dBm</td>
-            <td id="sys-uptime" class="num">00:00:00</td>
-            <td class="num">RST: 18 &bull; CS: 19 &bull; RS: 21 &bull; WR: 22 &bull; RD: 23</td>
-            <td class="num">D0:33 D1:32 D2:13 D3:12 D4:14 D5:27 D6:26 D7:25</td>
+            <td style="color:#00D4FF; font-weight:bold;">01 // FLOOD GAUGE</td>
+            <td id="t-flood-status" class="num">CONNECTING</td>
+            <td id="t-flood-depth" class="num">-- cm</td>
+            <td id="t-flood-clear" class="num">-- cm</td>
+            <td id="t-flood-hazard" class="num">--</td>
+          </tr>
+          <tr>
+            <td style="color:#FFB800; font-weight:bold;">02 // FIRE &amp; AIR</td>
+            <td id="t-fire-status" class="num">CONNECTING</td>
+            <td id="t-fire-temp" class="num">-- °C</td>
+            <td id="t-fire-gas" class="num">-- PPM</td>
+            <td id="t-fire-hazard" class="num">--</td>
+          </tr>
+          <tr>
+            <td style="color:#00FF87; font-weight:bold;">03 // LANDSLIDE</td>
+            <td id="t-land-status" class="num">CONNECTING</td>
+            <td id="t-land-accel" class="num">-- g</td>
+            <td id="t-land-tilt" class="num">--</td>
+            <td id="t-land-hazard" class="num">--</td>
           </tr>
         </tbody>
       </table>
     </div>
 
     <footer>
-      <span>ESP32 // ILI9488 3.5" 8-BIT PARALLEL TFT GATEWAY</span>
+      <span>HYDRA LEVEL 2 COMMAND KIOSK &bull; PEOC REGIONAL NETWORK</span>
       <span><a href="/update">[ OVER-THE-AIR FIRMWARE UPDATE ]</a></span>
     </footer>
 
@@ -979,69 +992,44 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     async function pollStatus() {
       try {
         const res = await fetch('/api/status');
-        if (!res.ok) return;
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
 
-        document.getElementById('prev-title').innerText = data.display.title;
-        document.getElementById('prev-msg').innerText = data.display.message;
-        document.getElementById('active-mode-badge').innerText = "LAYOUT: " + data.display.mode;
+        // Flood
+        document.getElementById('t-flood-status').innerText = data.flood.status;
+        document.getElementById('t-flood-depth').innerText = data.flood.water_depth_cm + ' cm';
+        document.getElementById('t-flood-clear').innerText = 'Clear: ' + data.flood.dist_cm + ' cm';
+        document.getElementById('t-flood-hazard').innerText = data.flood.hazard;
 
-        document.getElementById('sys-ip').innerText = data.sys.ip;
-        document.getElementById('sys-rssi').innerText = data.sys.rssi + " dBm";
-        document.getElementById('sys-uptime').innerText = formatUptime(data.sys.uptime_sec);
-      } catch (e) {}
-    }
+        // Fire
+        document.getElementById('t-fire-status').innerText = data.fire.status;
+        document.getElementById('t-fire-temp').innerText = data.fire.temp_c + ' °C (' + data.fire.humidity + '%)';
+        document.getElementById('t-fire-gas').innerText = data.fire.gas_ppm + ' PPM';
+        document.getElementById('t-fire-hazard').innerText = data.fire.hazard;
 
-    async function submitContent() {
-      const title = document.getElementById('input-title').value.trim();
-      const msg   = document.getElementById('input-msg').value.trim();
-      const mode  = document.getElementById('select-mode').value;
-      const theme = document.getElementById('select-theme').value;
-      const font  = document.getElementById('select-font').value;
-      const rot   = document.getElementById('select-rot').value;
+        // Landslide
+        document.getElementById('t-land-status').innerText = data.landslide.status;
+        document.getElementById('t-land-accel').innerText = data.landslide.accel_g + ' g';
+        document.getElementById('t-land-tilt').innerText = 'P:' + data.landslide.pitch + ' R:' + data.landslide.roll;
+        document.getElementById('t-land-hazard').innerText = data.landslide.hazard;
 
-      document.getElementById('render-status').innerText = "TRANSMITTING TO TFT...";
-
-      try {
-        const url = '/api/display?title=' + encodeURIComponent(title) +
-                    '&msg=' + encodeURIComponent(msg) +
-                    '&mode=' + encodeURIComponent(mode) +
-                    '&theme=' + encodeURIComponent(theme) +
-                    '&font=' + encodeURIComponent(font) +
-                    '&rot='  + encodeURIComponent(rot);
-        const res = await fetch(url);
-        if (res.ok) {
-          document.getElementById('render-status').innerText = "STATUS: DISPLAY UPDATED OK";
-          setTimeout(pollStatus, 200);
+        // Summary
+        document.getElementById('sys-status-badge').innerText = data.summary.status;
+        document.getElementById('last-sync-tag').innerText = 'LATENCY: ' + data.summary.latency_ms + 'ms';
+        
+        if (data.summary.emergency) {
+          document.getElementById('modal-title').innerHTML = '<span style="color:#FF3B3B;">! EMERGENCY ALERT ACTIVE !</span>';
+          document.getElementById('modal-desc').innerText = 'Breach active in region: ' + data.summary.region;
+        } else {
+          document.getElementById('modal-title').innerText = 'ALL STATIONS NOMINAL';
+          document.getElementById('modal-desc').innerText = 'Monitoring basin: ' + data.summary.region;
         }
       } catch (e) {
-        alert("Render error: " + e.message);
+        console.error('Fetch error:', e);
       }
     }
-
-    async function clearDisplay() {
-      document.getElementById('input-title').value = "SCREEN CLEARED";
-      document.getElementById('input-msg').value = "Waiting for incoming web messages...";
-      submitContent();
-    }
-
-    function setPreset(title, msg, mode, theme) {
-      document.getElementById('input-title').value = title;
-      document.getElementById('input-msg').value = msg;
-      document.getElementById('select-mode').value = mode;
-      document.getElementById('select-theme').value = theme;
-      submitContent();
-    }
-
-    function formatUptime(totalSecs) {
-      const h = Math.floor(totalSecs / 3600).toString().padStart(2, '0');
-      const m = Math.floor((totalSecs % 3600) / 60).toString().padStart(2, '0');
-      const s = Math.floor(totalSecs % 60).toString().padStart(2, '0');
-      return h + ":" + m + ":" + s;
-    }
-
+    setInterval(pollStatus, 2500);
     pollStatus();
-    setInterval(pollStatus, 3000);
   </script>
 </body>
 </html>
@@ -1190,42 +1178,48 @@ void setupWebOTA() {
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(500);
 
   Serial.println("\n==============================================");
-  Serial.println("  ESP32 // 3.5\" ILI9488 8-BIT PARALLEL TFT");
+  Serial.println("  HYDRA LEVEL 2 PEOC KIOSK // 3.5\" ILI9488   ");
   Serial.println("==============================================");
 
-  // Initialize ILI9488 using exact 8-bit parallel driver from example.ino
+  // 1. Initialize ILI9488 8-bit parallel display
   tftInit();
-  applyTheme("MONO");
+  applyTheme("CYAN");
 
-  // Show splash screen on TFT
-  fillScreen(COLOR_BLACK);
-  drawTextCentered(100, "ESP32 // ILI9488", COLOR_WHITE, 2);
-  drawTextCentered(135, "3.5\" IPS 8-BIT PARALLEL DISPLAY", COLOR_WHITE, 1);
-  drawTextCentered(165, "CONNECTING TO WI-FI: 'sakshyam'...", COLOR_WHITE, 1);
+  // 2. HYDRA Animated Boot Up Screen
+  renderBootScreen(15, "INITIALIZING 8-BIT PARALLEL TFT BUS... [OK]");
+  delay(600);
 
-  // Connect to Wi-Fi
+  renderBootScreen(35, "STARTING ARDUINO NANO ESP32 SUBSYSTEMS... [OK]");
+  delay(400);
+
+  renderBootScreen(55, "CONNECTING TO WI-FI: 'sakshyam'...");
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.printf("[WIFI] Connecting to '%s'", WIFI_SSID);
 
   unsigned long startAttemptTime = millis();
+  int wifiProgress = 55;
   while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
     delay(500);
+    wifiProgress = min(80, wifiProgress + 3);
+    renderBootScreen(wifiProgress, "CONNECTING TO WI-FI ROUTER...");
     Serial.print(".");
   }
   Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
+    renderBootScreen(85, "WI-FI LINK ESTABLISHED! ASSIGNED IP.");
     Serial.print("[WIFI] Connected! Display Web IP: ");
     Serial.println(WiFi.localIP());
+    delay(400);
   } else {
-    Serial.println("[WIFI] Router timeout. Starting Access Point...");
+    renderBootScreen(85, "ROUTER TIMEOUT. LAUNCHING ACCESS POINT...");
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASSWORD);
-    Serial.printf("[WIFI] SoftAP Active: '%s'\n", AP_SSID);
+    delay(400);
   }
 
   // Setup mDNS
@@ -1240,19 +1234,32 @@ void setup() {
   server.on("/api/display", HTTP_GET, handleDisplayUpdate);
   server.on("/api/refresh", HTTP_GET, []() {
     fetchTelemetryFeed();
-    renderKioskDisplay();
+    renderDisplay();
     server.send(200, "application/json", "{\"status\":\"REFRESHED\"}");
   });
   setupWebOTA();
   server.begin();
   Serial.println("[HTTP] Web server listening on port 80.");
 
-  // Fetch initial telemetry and render Kiosk on TFT display
+  // Fetch initial telemetry from HYDRA server
   if (WiFi.status() == WL_CONNECTED) {
-    drawTextCentered(195, "CONNECTING TO HYDRA CLOUD SERVER...", COLOR_CYAN, 1);
+    renderBootScreen(95, "FETCHING LIVE TELEMETRY FEED FROM SERVER...");
     fetchTelemetryFeed();
+    delay(500);
   }
-  renderKioskDisplay();
+
+  renderBootScreen(100, "BOOT COMPLETE. LAUNCHING HYDRA DISASTER COMMAND...");
+  delay(1000);
+
+  // Transition to data / alert screen
+  bool isAlert = liveSummary.isEmergency || 
+                 (liveFlood.hazard == "CRITICAL" || liveFlood.hazard == "HIGH") ||
+                 (liveLandslide.hazard == "CRITICAL" || liveLandslide.hazard == "HIGH") ||
+                 (liveFire.hazard == "CRITICAL" || liveFire.hazard == "HIGH");
+  currentScreenState = isAlert ? STATE_ALERT : STATE_NORMAL;
+  fillScreen(COLOR_BG);
+
+  renderDisplay();
 }
 
 void loop() {
@@ -1266,8 +1273,19 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED) {
       fetchTelemetryFeed();
     }
-    if (currentMode == "KIOSK") {
-      renderKioskDisplay();
+
+    bool isAlert = liveSummary.isEmergency || 
+                   (liveFlood.hazard == "CRITICAL" || liveFlood.hazard == "HIGH") ||
+                   (liveLandslide.hazard == "CRITICAL" || liveLandslide.hazard == "HIGH") ||
+                   (liveFire.hazard == "CRITICAL" || liveFire.hazard == "HIGH");
+
+    DisplayState targetState = isAlert ? STATE_ALERT : STATE_NORMAL;
+
+    if (targetState != currentScreenState) {
+      currentScreenState = targetState;
+      fillScreen(COLOR_BG); // Clean transition between Normal & Alert
     }
+
+    renderDisplay();
   }
 }

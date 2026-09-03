@@ -1,1075 +1,1143 @@
 /* ====================================================================
- * ARDUINO / PLATFORMIO ESP32 SENSOR TELEMETRY & DUAL OTA WEB SERVER
- * Microcontroller : ESP32 (Dev Module / WROOM-32)
- * Sensors         : NEO-6M GPS (Hardware Serial 2) + MPU-6050 6-DOF IMU (I2C)
- * Aesthetics      : Stark Monochrome (Pure Black & White, 0px Radius)
- * Data Integrity  : 100% Genuine Sensor Readings (Zero Fake / Mock Data)
- * GPS Diagnostics : Live Hardware Alive Check & Constellation Search Monitor
- * OTA Features    : 1) Browser Web OTA at /update
- *                   2) Network ArduinoOTA for IDE & PlatformIO
+ * ESP32 + 3.5" ILI9488 IPS TFT LCD (8-BIT PARALLEL) WEB DISPLAY
+ * Reference: Exact Hardware & Pin Configuration from example.ino
+ * Display Controller : ILI9488 3.5" TFT LCD (8-bit Parallel Mode, 320x480 / 480x320)
+ * Low-Level Driver   : Direct Zero-Dependency High-Speed GPIO Bus
+ * Wi-Fi Credentials  : SSID "sakshyam" | Password "sakshyam"
+ * Features           : Web-to-Display Custom Streamer, 4 Layouts, 4 Themes
  * ==================================================================== */
 
-#include <Adafruit_MPU6050.h>
-#include <Adafruit_Sensor.h>
 #include <Arduino.h>
-#include <ArduinoOTA.h>
-#include <ESPmDNS.h>
-#include <HTTPClient.h>
-#include <TinyGPSPlus.h>
-#include <Update.h>
-#include <WebServer.h>
 #include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <Update.h>
+#include <ArduinoOTA.h>
+#include <HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <Wire.h>
+#include <ArduinoJson.h>
 
 /* ====================================================================
- * 1. WI-FI, SERVER & OTA CONFIGURATION
+ * 1. ILI9488 8-BIT PARALLEL PINS (EXACTLY MATCHING example.ino)
  * ==================================================================== */
-// Local Wi-Fi router credentials
-const char *WIFI_SSID = "sakshyam";
-const char *WIFI_PASSWORD = "sakshyam";
 
-// HYDRA Server API Ingest Configuration (from a.md / Section 1 & 2.C)
-// Production Endpoint
-const char *SERVER_API_URL =
-    "https://zenithkandel.com.np/hydra/backend/api/telemetry/landslide.php";
-// Local Development / Raspberry Pi Fallback (uncomment to use local server)
-// const char* SERVER_API_URL =
-// "http://192.168.1.100/codes/hydra/backend/api/telemetry/landslide.php";
+// Control Pins
+#define TFT_RST 18  // Hardware Reset
+#define TFT_CS  19  // Chip Select (Active LOW)
+#define TFT_RS  21  // Register Select / DC (0 = Command, 1 = Data)
+#define TFT_WR  22  // Write Strobe (Active LOW)
+#define TFT_RD  23  // Read Strobe (Active LOW)
 
-const char *NODE_UID = "NODE-LANDSLIDE-01";
-const unsigned long TELEMETRY_SEND_INTERVAL_MS =
-    500; // Cadence: every 2.0s (1 to 2s per a.md)
+// 8-Bit Data Bus Pins (D0 to D7)
+#define TFT_D0  33
+#define TFT_D1  32
+#define TFT_D2  13
+#define TFT_D3  12
+#define TFT_D4  14
+#define TFT_D5  27
+#define TFT_D6  26
+#define TFT_D7  25
 
-// Fallback Access Point (AP) if router is out of range
-const char *AP_SSID = "ESP32-TELEMETRY";
-const char *AP_PASSWORD = "12345678"; // minimum 8 characters
-
-// mDNS Hostname (Access at http://esp32-telemetry.local)
-const char *MDNS_HOSTNAME = "esp32-telemetry";
-
-// OTA Security Credentials (used for both Web OTA /update and ArduinoOTA)
-const char *otaUsername = "admin";
-const char *otaPassword = "admin";
+const uint8_t dataPins[8] = { TFT_D0, TFT_D1, TFT_D2, TFT_D3,
+                             TFT_D4, TFT_D5, TFT_D6, TFT_D7 };
 
 /* ====================================================================
- * 2. HARDWARE PIN DEFINITIONS
+ * 2. WI-FI, SERVER FEED & OTA CREDENTIALS
  * ==================================================================== */
-// Onboard Status LED Indicator (GPIO 2 on ESP32 Dev Module / WROOM-32)
-#ifndef LED_BUILTIN
-#define LED_BUILTIN 2
-#endif
-#define ONBOARD_LED_PIN LED_BUILTIN
+const char* WIFI_SSID     = "sakshyam";
+const char* WIFI_PASSWORD = "sakshyam";
 
-// NEO-6M GPS Module connected to Hardware Serial 2
-#define GPS_RX_PIN 16 // ESP32 GPIO16 (RX2) -> Connect to GPS TX
-#define GPS_TX_PIN 17 // ESP32 GPIO17 (TX2) -> Connect to GPS RX
-#define GPS_BAUD 9600
+// HYDRA Production Consolidated Telemetry Feed URL (per a.md Section 1 & 4)
+const char* SERVER_FEED_URL = "https://zenithkandel.com.np/hydra/backend/api/telemetry/feed.php";
+// Local Development Fallback
+// const char* SERVER_FEED_URL = "http://192.168.1.100/codes/hydra/backend/api/telemetry/feed.php";
 
-// MPU-6050 IMU connected to Hardware I2C (Wire)
-#define I2C_SDA_PIN 21 // ESP32 GPIO21 -> Connect to MPU6050 SDA
-#define I2C_SCL_PIN 22 // ESP32 GPIO22 -> Connect to MPU6050 SCL
+const unsigned long SERVER_POLL_INTERVAL_MS = 2500; // Ingest cadence: 2.5s
+unsigned long lastServerPollTime = 0;
+
+const char* AP_SSID       = "ESP32-TFT-DISPLAY";
+const char* AP_PASSWORD   = "12345678";
+
+const char* MDNS_HOSTNAME = "tft-display";
+const char* otaUsername   = "admin";
+const char* otaPassword   = "admin";
+
+// Live Server Telemetry Cache (Level 2 City Hub / PEOC Kiosk Mirror)
+struct FloodData {
+  String name = "MODI KHOLA SURGE";
+  String status = "STANDBY";
+  float distCm = 0.0;
+  float waterDepthCm = 0.0;
+  String zone = "WAITING";
+  String hazard = "NOMINAL";
+  String lastSync = "--:--:--";
+} liveFlood;
+
+struct FireData {
+  String name = "PINE RIDGE SENTINEL";
+  String status = "STANDBY";
+  float tempC = 0.0;
+  float humidity = 0.0;
+  float gasPpm = 0.0;
+  String airQuality = "Warming up";
+  String hazard = "NOMINAL";
+  String lastSync = "--:--:--";
+} liveFire;
+
+struct LandslideData {
+  String name = "ANNAPURNA ESCARPMENT";
+  String status = "STANDBY";
+  bool gpsConnected = false;
+  bool gpsFix = false;
+  int satellites = 0;
+  float lat = 0.0;
+  float lng = 0.0;
+  float altM = 0.0;
+  float speedKmh = 0.0;
+  float pitch = 0.0;
+  float roll = 0.0;
+  float accelG = 1.0;
+  String hazard = "NOMINAL";
+  String lastSync = "--:--:--";
+} liveLandslide;
+
+struct SystemSummary {
+  String region = "GHANDRUK BASIN, NEPAL";
+  String overallStatus = "CONNECTING...";
+  String masterStatus = "STANDBY";
+  String gsmStatus = "GSM_ONLINE";
+  bool isEmergency = false;
+  unsigned long lastFetchMillis = 0;
+  int lastHttpCode = 0;
+  unsigned long lastLatencyMs = 0;
+  unsigned long fetchSuccessCount = 0;
+  unsigned long fetchFailCount = 0;
+} liveSummary;
 
 /* ====================================================================
- * 3. GLOBAL OBJECTS & STATE
+ * 3. DISPLAY CONFIGURATION & RGB565 COLOR MACROS
  * ==================================================================== */
+#define RGB565(r, g, b) (((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3))
+
+#define COLOR_BLACK       0x0000
+#define COLOR_WHITE       0xFFFF
+#define COLOR_DARK_GRAY   0x1082
+#define COLOR_PANEL_BG    0x0841
+#define COLOR_RED         RGB565(255, 59, 59)
+#define COLOR_GREEN       RGB565(0, 255, 135)
+#define COLOR_AMBER       RGB565(255, 184, 0)
+#define COLOR_CYAN        RGB565(0, 212, 255)
+
+// Dynamic Screen Dimensions
+int screenWidth  = 480;
+int screenHeight = 320;
+uint8_t currentRotation = 1; // 1 = Landscape (480x320), 0 = Portrait (320x480)
+
+// Active Theme Colors
+uint16_t COLOR_BG     = COLOR_BLACK;
+uint16_t COLOR_FG     = COLOR_WHITE;
+uint16_t COLOR_ACCENT = COLOR_WHITE;
+uint16_t COLOR_PANEL  = COLOR_DARK_GRAY;
+uint16_t COLOR_BORDER = COLOR_WHITE;
+
+// Display State
+String currentTitle      = "HYDRA PEOC COMMAND KIOSK";
+String currentMessage    = "Live telemetry streaming continuously from https://zenithkandel.com.np/hydra";
+String currentMode       = "KIOSK"; // KIOSK (default live mirror), CARD, HUD, ALERT, TEXT
+String currentTheme      = "MONO";  // MONO, CYAN, EMERALD, AMBER
+int    currentFontSize   = 2;       // 1 = Small, 2 = Medium, 3 = Large
+
 WebServer server(80);
-HardwareSerial gpsSerial(2);
-TinyGPSPlus gps;
-Adafruit_MPU6050 mpu;
-
-bool mpuConnected = false;
-unsigned long lastGpsByteMillis = 0; // Tracks live UART reception from GPS
-unsigned long lastSensorReadTime = 0;
-const unsigned long SENSOR_INTERVAL_MS = 100; // Read IMU at 10 Hz
-
-// Server Telemetry Uplink State
-unsigned long lastServerSendMillis = 0;
-int lastServerHttpCode = 0;
-unsigned long lastServerDurationMs = 0;
-unsigned long serverSuccessCount = 0;
-unsigned long serverFailCount = 0;
-String lastServerResponse = "WAITING FOR FIRST UPLINK";
-
-struct MPUData {
-  float ax, ay, az;             // Acceleration in m/s^2
-  float ax_g, ay_g, az_g;       // Acceleration in g (1g = 9.80665 m/s^2)
-  float total_accel_g;          // Vector magnitude
-  float gx, gy, gz;             // Gyro in deg/s
-  float gx_rad, gy_rad, gz_rad; // Gyro in rad/s
-  float temp_c;                 // Temperature in °C
-  float temp_f;                 // Temperature in °F
-  float pitch;                  // Pitch angle (degrees)
-  float roll;                   // Roll angle (degrees)
-} mpuData;
 
 /* ====================================================================
- * 4. EMBEDDED SHARP MONOCHROME DASHBOARD HTML
+ * 4. FONT 5x7 BITMAP TABLE (From example.ino)
+ * ==================================================================== */
+const uint8_t font5x7[96][5] PROGMEM = {
+    {0x00, 0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x5F, 0x00, 0x00},
+    {0x00, 0x07, 0x00, 0x07, 0x00}, {0x14, 0x7F, 0x14, 0x7F, 0x14},
+    {0x24, 0x2A, 0x7F, 0x2A, 0x12}, {0x23, 0x13, 0x08, 0x64, 0x62},
+    {0x36, 0x49, 0x55, 0x22, 0x50}, {0x00, 0x05, 0x03, 0x00, 0x00},
+    {0x00, 0x1C, 0x22, 0x41, 0x00}, {0x00, 0x41, 0x22, 0x1C, 0x00},
+    {0x08, 0x2A, 0x1C, 0x2A, 0x08}, {0x08, 0x08, 0x3E, 0x08, 0x08},
+    {0x00, 0x50, 0x30, 0x00, 0x00}, {0x08, 0x08, 0x08, 0x08, 0x08},
+    {0x00, 0x60, 0x60, 0x00, 0x00}, {0x20, 0x10, 0x08, 0x04, 0x02},
+    {0x3E, 0x51, 0x49, 0x45, 0x3E}, {0x00, 0x42, 0x7F, 0x40, 0x00},
+    {0x42, 0x61, 0x51, 0x49, 0x46}, {0x21, 0x41, 0x45, 0x4B, 0x31},
+    {0x18, 0x14, 0x12, 0x7F, 0x10}, {0x27, 0x45, 0x45, 0x45, 0x39},
+    {0x3C, 0x4A, 0x49, 0x49, 0x30}, {0x01, 0x71, 0x09, 0x05, 0x03},
+    {0x36, 0x49, 0x49, 0x49, 0x36}, {0x06, 0x49, 0x49, 0x29, 0x1E},
+    {0x00, 0x36, 0x36, 0x00, 0x00}, {0x00, 0x56, 0x36, 0x00, 0x00},
+    {0x00, 0x08, 0x14, 0x22, 0x41}, {0x14, 0x14, 0x14, 0x14, 0x14},
+    {0x41, 0x22, 0x14, 0x08, 0x00}, {0x02, 0x01, 0x51, 0x09, 0x06},
+    {0x32, 0x49, 0x79, 0x41, 0x3E}, {0x7E, 0x11, 0x11, 0x11, 0x7E},
+    {0x7F, 0x49, 0x49, 0x49, 0x36}, {0x3E, 0x41, 0x41, 0x41, 0x22},
+    {0x7F, 0x41, 0x41, 0x22, 0x1C}, {0x7F, 0x49, 0x49, 0x49, 0x41},
+    {0x7F, 0x09, 0x09, 0x01, 0x01}, {0x3E, 0x41, 0x41, 0x51, 0x32},
+    {0x7F, 0x08, 0x08, 0x08, 0x7F}, {0x00, 0x41, 0x7F, 0x41, 0x00},
+    {0x20, 0x40, 0x41, 0x3F, 0x01}, {0x7F, 0x08, 0x14, 0x22, 0x41},
+    {0x7F, 0x40, 0x40, 0x40, 0x40}, {0x7F, 0x02, 0x04, 0x02, 0x7F},
+    {0x7F, 0x04, 0x08, 0x10, 0x7F}, {0x3E, 0x41, 0x41, 0x41, 0x3E},
+    {0x7F, 0x09, 0x09, 0x09, 0x06}, {0x3E, 0x41, 0x51, 0x21, 0x5E},
+    {0x7F, 0x09, 0x19, 0x29, 0x46}, {0x46, 0x49, 0x49, 0x49, 0x31},
+    {0x01, 0x01, 0x7F, 0x01, 0x01}, {0x3F, 0x40, 0x40, 0x40, 0x3F},
+    {0x1F, 0x20, 0x40, 0x20, 0x1F}, {0x7F, 0x20, 0x18, 0x20, 0x7F},
+    {0x63, 0x14, 0x08, 0x14, 0x63}, {0x03, 0x04, 0x78, 0x04, 0x03},
+    {0x61, 0x51, 0x49, 0x45, 0x43}, {0x00, 0x00, 0x7F, 0x41, 0x41},
+    {0x02, 0x04, 0x08, 0x10, 0x20}, {0x41, 0x41, 0x7F, 0x00, 0x00},
+    {0x04, 0x02, 0x01, 0x02, 0x04}, {0x40, 0x40, 0x40, 0x40, 0x40},
+    {0x00, 0x01, 0x02, 0x04, 0x00}, {0x20, 0x54, 0x54, 0x54, 0x78},
+    {0x7F, 0x48, 0x44, 0x44, 0x38}, {0x38, 0x44, 0x44, 0x44, 0x20},
+    {0x38, 0x44, 0x44, 0x48, 0x7F}, {0x38, 0x54, 0x54, 0x54, 0x18},
+    {0x08, 0x7E, 0x09, 0x01, 0x02}, {0x08, 0x14, 0x54, 0x54, 0x3C},
+    {0x7F, 0x08, 0x04, 0x04, 0x78}, {0x00, 0x44, 0x7D, 0x40, 0x00},
+    {0x20, 0x40, 0x44, 0x3D, 0x00}, {0x00, 0x7F, 0x10, 0x28, 0x44},
+    {0x00, 0x41, 0x7F, 0x40, 0x00}, {0x7C, 0x04, 0x18, 0x04, 0x78},
+    {0x7C, 0x08, 0x04, 0x04, 0x78}, {0x38, 0x44, 0x44, 0x44, 0x38},
+    {0x7C, 0x14, 0x14, 0x14, 0x08}, {0x08, 0x14, 0x14, 0x18, 0x7C},
+    {0x7C, 0x08, 0x04, 0x04, 0x08}, {0x48, 0x54, 0x54, 0x54, 0x20},
+    {0x04, 0x3F, 0x44, 0x40, 0x20}, {0x3C, 0x40, 0x40, 0x20, 0x7C},
+    {0x1C, 0x20, 0x40, 0x20, 0x1C}, {0x3C, 0x40, 0x30, 0x40, 0x3C},
+    {0x44, 0x28, 0x10, 0x28, 0x44}, {0x0C, 0x50, 0x50, 0x50, 0x3C},
+    {0x44, 0x64, 0x54, 0x4C, 0x44}, {0x00, 0x08, 0x36, 0x41, 0x00},
+    {0x00, 0x00, 0x7F, 0x00, 0x00}, {0x00, 0x41, 0x36, 0x08, 0x00},
+    {0x08, 0x08, 0x2A, 0x1C, 0x08}, {0x08, 0x1C, 0x2A, 0x08, 0x08},
+};
+
+/* ====================================================================
+ * 5. LOW-LEVEL 8-BIT PARALLEL DRIVER ROUTINES (From example.ino)
+ * ==================================================================== */
+
+inline void writeData8(uint8_t data) {
+  for (int i = 0; i < 8; i++) {
+    digitalWrite(dataPins[i], (data >> i) & 0x01);
+  }
+  digitalWrite(TFT_WR, LOW);
+  digitalWrite(TFT_WR, HIGH);
+}
+
+void writeCommand(uint8_t cmd) {
+  digitalWrite(TFT_RS, LOW);
+  digitalWrite(TFT_CS, LOW);
+  writeData8(cmd);
+  digitalWrite(TFT_CS, HIGH);
+}
+
+void writeDataByte(uint8_t data) {
+  digitalWrite(TFT_RS, HIGH);
+  digitalWrite(TFT_CS, LOW);
+  writeData8(data);
+  digitalWrite(TFT_CS, HIGH);
+}
+
+void setAddressWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
+  writeCommand(0x2A);
+  writeDataByte(x0 >> 8);
+  writeDataByte(x0);
+  writeDataByte(x1 >> 8);
+  writeDataByte(x1);
+  writeCommand(0x2B);
+  writeDataByte(y0 >> 8);
+  writeDataByte(y0);
+  writeDataByte(y1 >> 8);
+  writeDataByte(y1);
+  writeCommand(0x2C);
+}
+
+void fillScreen(uint16_t color) {
+  setAddressWindow(0, 0, screenWidth - 1, screenHeight - 1);
+  digitalWrite(TFT_RS, HIGH);
+  digitalWrite(TFT_CS, LOW);
+  uint8_t hi = color >> 8, lo = color & 0xFF;
+  for (uint32_t i = 0; i < (uint32_t)screenWidth * screenHeight; i++) {
+    writeData8(hi);
+    writeData8(lo);
+  }
+  digitalWrite(TFT_CS, HIGH);
+}
+
+void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
+  if (x >= screenWidth || y >= screenHeight || w <= 0 || h <= 0) return;
+  if (x + w > screenWidth)  w = screenWidth - x;
+  if (y + h > screenHeight) h = screenHeight - y;
+  setAddressWindow(x, y, x + w - 1, y + h - 1);
+  digitalWrite(TFT_RS, HIGH);
+  digitalWrite(TFT_CS, LOW);
+  uint8_t hi = color >> 8, lo = color & 0xFF;
+  for (uint32_t i = 0; i < (uint32_t)w * h; i++) {
+    writeData8(hi);
+    writeData8(lo);
+  }
+  digitalWrite(TFT_CS, HIGH);
+}
+
+void drawHLine(int16_t x, int16_t y, int16_t w, uint16_t color) {
+  fillRect(x, y, w, 1, color);
+}
+
+void drawVLine(int16_t x, int16_t y, int16_t h, uint16_t color) {
+  fillRect(x, y, 1, h, color);
+}
+
+void drawRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
+  drawHLine(x, y, w, color);
+  drawHLine(x, y + h - 1, w, color);
+  drawVLine(x, y, h, color);
+  drawVLine(x + w - 1, y, h, color);
+}
+
+void setRotation(uint8_t r) {
+  currentRotation = r;
+  writeCommand(0x36);
+  if (r == 1) {
+    writeDataByte(0x28); // Landscape (480x320)
+    screenWidth  = 480;
+    screenHeight = 320;
+  } else {
+    writeDataByte(0x48); // Portrait (320x480)
+    screenWidth  = 320;
+    screenHeight = 480;
+  }
+}
+
+void tftInit() {
+  pinMode(TFT_RST, OUTPUT);
+  pinMode(TFT_CS, OUTPUT);
+  pinMode(TFT_RS, OUTPUT);
+  pinMode(TFT_WR, OUTPUT);
+  pinMode(TFT_RD, OUTPUT);
+  for (int i = 0; i < 8; i++) pinMode(dataPins[i], OUTPUT);
+
+  digitalWrite(TFT_CS, HIGH);
+  digitalWrite(TFT_RD, HIGH);
+  digitalWrite(TFT_WR, HIGH);
+
+  digitalWrite(TFT_RST, HIGH);
+  delay(50);
+  digitalWrite(TFT_RST, LOW);
+  delay(150);
+  digitalWrite(TFT_RST, HIGH);
+  delay(150);
+
+  writeCommand(0x01); delay(150);
+  writeCommand(0x11); delay(150);
+  writeCommand(0x3A); writeDataByte(0x55);
+  setRotation(currentRotation);
+  writeCommand(0x29); delay(50);
+
+  Serial.println("[OK] ILI9488 initialized in 8-bit Parallel Mode!");
+}
+
+/* ====================================================================
+ * 6. GRAPHICS & TEXT RENDERING
+ * ==================================================================== */
+
+void drawChar(int16_t x, int16_t y, char c, uint16_t color, uint8_t size) {
+  if (c < 32 || c > 127) c = ' ';
+  uint8_t idx = c - 32;
+  for (int col = 0; col < 5; col++) {
+    uint8_t line = pgm_read_byte(&font5x7[idx][col]);
+    for (int row = 0; row < 7; row++) {
+      if (line & (1 << row)) {
+        if (size == 1) {
+          if (x + col >= 0 && x + col < screenWidth && y + row >= 0 && y + row < screenHeight) {
+            fillRect(x + col, y + row, 1, 1, color);
+          }
+        } else {
+          fillRect(x + col * size, y + row * size, size, size, color);
+        }
+      }
+    }
+  }
+}
+
+void drawText(int16_t x, int16_t y, const char *text, uint16_t color, uint8_t size) {
+  while (*text) {
+    drawChar(x, y, *text++, color, size);
+    x += 6 * size;
+  }
+}
+
+void drawText(int16_t x, int16_t y, const String &text, uint16_t color, uint8_t size) {
+  drawText(x, y, text.c_str(), color, size);
+}
+
+void drawTextCentered(int16_t y, const char *text, uint16_t color, uint8_t size) {
+  int16_t x = (screenWidth - strlen(text) * 6 * size) / 2;
+  if (x < 0) x = 0;
+  drawText(x, y, text, color, size);
+}
+
+void drawTextCentered(int16_t y, const String &text, uint16_t color, uint8_t size) {
+  drawTextCentered(y, text.c_str(), color, size);
+}
+
+void drawWrappedText(int16_t x, int16_t y, int16_t maxW, const String& text, uint16_t color, uint8_t size) {
+  int16_t curX = x;
+  int16_t curY = y;
+  int16_t charW = 6 * size;
+  int16_t lineH = 8 * size + 4;
+  int len = text.length();
+  int i = 0;
+
+  while (i < len) {
+    if (text[i] == '\n') {
+      curX = x;
+      curY += lineH;
+      i++;
+      continue;
+    }
+    int nextSpace = text.indexOf(' ', i);
+    int nextNewline = text.indexOf('\n', i);
+    int wordEnd = len;
+    if (nextSpace != -1 && (nextNewline == -1 || nextSpace < nextNewline)) {
+      wordEnd = nextSpace;
+    } else if (nextNewline != -1) {
+      wordEnd = nextNewline;
+    }
+    int wordLen = wordEnd - i;
+    int wordPix = wordLen * charW;
+
+    if (curX + wordPix > x + maxW && curX > x) {
+      curX = x;
+      curY += lineH;
+    }
+    for (int j = i; j < wordEnd; j++) {
+      drawChar(curX, curY, text[j], color, size);
+      curX += charW;
+    }
+    if (wordEnd < len && text[wordEnd] == ' ') {
+      drawChar(curX, curY, ' ', color, size);
+      curX += charW;
+      i = wordEnd + 1;
+    } else {
+      i = wordEnd;
+    }
+  }
+}
+
+void applyTheme(String themeName) {
+  currentTheme = themeName;
+  if (themeName == "CYAN") {
+    COLOR_BG     = RGB565(5, 15, 25);
+    COLOR_FG     = COLOR_WHITE;
+    COLOR_ACCENT = COLOR_CYAN;
+    COLOR_PANEL  = RGB565(15, 30, 50);
+    COLOR_BORDER = COLOR_CYAN;
+  } else if (themeName == "EMERALD") {
+    COLOR_BG     = RGB565(5, 20, 10);
+    COLOR_FG     = COLOR_WHITE;
+    COLOR_ACCENT = COLOR_GREEN;
+    COLOR_PANEL  = RGB565(10, 35, 20);
+    COLOR_BORDER = COLOR_GREEN;
+  } else if (themeName == "AMBER") {
+    COLOR_BG     = COLOR_BLACK;
+    COLOR_FG     = COLOR_WHITE;
+    COLOR_ACCENT = COLOR_AMBER;
+    COLOR_PANEL  = RGB565(40, 30, 0);
+    COLOR_BORDER = COLOR_AMBER;
+  } else { // Default MONO
+    COLOR_BG     = COLOR_BLACK;
+    COLOR_FG     = COLOR_WHITE;
+    COLOR_ACCENT = COLOR_WHITE;
+    COLOR_PANEL  = COLOR_DARK_GRAY;
+    COLOR_BORDER = COLOR_WHITE;
+  }
+}
+
+/* ====================================================================
+ * 6.5. HYDRA SERVER TELEMETRY INGEST (HTTP/HTTPS GET)
+ * ==================================================================== */
+
+void fetchTelemetryFeed() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  HTTPClient http;
+  http.setTimeout(3500);
+  unsigned long startT = millis();
+  bool isHttps = String(SERVER_FEED_URL).startsWith("https://");
+  int httpCode = 0;
+  String payload = "";
+
+  if (isHttps) {
+    WiFiClientSecure secureClient;
+    secureClient.setInsecure();
+    secureClient.setTimeout(3500);
+    if (http.begin(secureClient, SERVER_FEED_URL)) {
+      httpCode = http.GET();
+      if (httpCode > 0) {
+        payload = http.getString();
+      }
+      http.end();
+    }
+  } else {
+    WiFiClient client;
+    client.setTimeout(3500);
+    if (http.begin(client, SERVER_FEED_URL)) {
+      httpCode = http.GET();
+      if (httpCode > 0) {
+        payload = http.getString();
+      }
+      http.end();
+    }
+  }
+
+  liveSummary.lastLatencyMs = millis() - startT;
+  liveSummary.lastHttpCode = httpCode;
+  liveSummary.lastFetchMillis = millis();
+
+  if (httpCode == 200 && payload.length() > 0) {
+    liveSummary.fetchSuccessCount++;
+    
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (!error) {
+      JsonObject data = doc["data"];
+      liveSummary.region = data["region"].as<const char*>() ? String(data["region"].as<const char*>()) : "ANNAPURNA BASIN";
+      String st = data["alert_summary"]["overall_status"] | "NOMINAL";
+      liveSummary.overallStatus = st;
+      liveSummary.isEmergency = (st == "CRITICAL" || st == "ALERT");
+
+      // Flood Node
+      JsonObject flood = data["nodes"]["flood_node"];
+      if (!flood.isNull()) {
+        liveFlood.status = flood["status"] | "ONLINE";
+        liveFlood.distCm = flood["dist_cm"] | 0.0f;
+        liveFlood.waterDepthCm = flood["water_depth_cm"] | 0.0f;
+        liveFlood.zone = flood["zone"] | "--";
+        liveFlood.hazard = flood["hazard_level"] | "NORMAL";
+        liveFlood.lastSync = flood["last_sync"] | "--";
+      }
+
+      // Fire Node
+      JsonObject fire = data["nodes"]["fire_node"];
+      if (!fire.isNull()) {
+        liveFire.status = fire["status"] | "ONLINE";
+        liveFire.tempC = fire["temperatureC"] | 0.0f;
+        liveFire.humidity = fire["humidity"] | 0.0f;
+        liveFire.gasPpm = fire["gasPPM"] | 0.0f;
+        liveFire.airQuality = fire["air_quality"] | "--";
+        liveFire.hazard = fire["hazard_level"] | "NORMAL";
+        liveFire.lastSync = fire["last_sync"] | "--";
+      }
+
+      // Landslide Node
+      JsonObject landslide = data["nodes"]["landslide_node"];
+      if (!landslide.isNull()) {
+        liveLandslide.status = landslide["status"] | "ONLINE";
+        liveLandslide.hazard = landslide["hazard_level"] | "NORMAL";
+        liveLandslide.lastSync = landslide["last_sync"] | "--";
+
+        JsonObject gps = landslide["gps"];
+        if (!gps.isNull()) {
+          liveLandslide.gpsConnected = gps["connected"] | false;
+          liveLandslide.gpsFix = gps["fix"] | false;
+          liveLandslide.satellites = gps["satellites"] | 0;
+          liveLandslide.lat = gps["lat"] | 0.0f;
+          liveLandslide.lng = gps["lng"] | 0.0f;
+          liveLandslide.altM = gps["alt_m"] | 0.0f;
+          liveLandslide.speedKmh = gps["speed_kmh"] | 0.0f;
+        }
+
+        JsonObject mpu = landslide["mpu"];
+        if (!mpu.isNull()) {
+          liveLandslide.accelG = mpu["total_accel_g"] | 1.0f;
+          liveLandslide.pitch = mpu["pitch"] | 0.0f;
+          liveLandslide.roll = mpu["roll"] | 0.0f;
+        }
+      }
+
+      // Master Node
+      JsonObject master = data["nodes"]["master_node"];
+      if (!master.isNull()) {
+        liveSummary.masterStatus = master["status"] | "ONLINE";
+        liveSummary.gsmStatus = master["cellular_gateway"] | "GSM_ONLINE";
+      }
+
+      Serial.printf("[SERVER] Telemetry Ingest OK (200, %lums): %s | Status: %s\n",
+                    liveSummary.lastLatencyMs, liveSummary.region.c_str(), liveSummary.overallStatus.c_str());
+    } else {
+      Serial.printf("[SERVER] JSON Deserialization error: %s\n", error.c_str());
+    }
+  } else {
+    liveSummary.fetchFailCount++;
+    Serial.printf("[SERVER] Feed fetch failed HTTP %d (%lums)\n", httpCode, liveSummary.lastLatencyMs);
+  }
+}
+
+/* ====================================================================
+ * 7. NATIVE ON-SCREEN DASHBOARD RENDER ROUTINES
+ * ==================================================================== */
+
+enum DisplayState {
+  STATE_BOOT,
+  STATE_NORMAL,
+  STATE_ALERT
+};
+
+DisplayState currentScreenState = STATE_BOOT;
+
+// 7.1. HYDRA SYSTEM BOOT UP SEQUENCE (Splash & Progress Bar)
+void renderBootScreen(int progressPct, const char* statusMsg) {
+  fillScreen(COLOR_BLACK);
+
+  // Outer framing
+  drawRect(10, 10, screenWidth - 20, screenHeight - 20, COLOR_CYAN);
+  drawRect(12, 12, screenWidth - 24, screenHeight - 24, COLOR_WHITE);
+
+  // Stylized Title block
+  fillRect(16, 20, screenWidth - 32, 65, RGB565(10, 20, 35));
+  drawRect(16, 20, screenWidth - 32, 65, COLOR_CYAN);
+  drawTextCentered(30, "H Y D R A", COLOR_WHITE, 3);
+  drawTextCentered(58, "AUTONOMOUS DISASTER WARNING NETWORK", COLOR_CYAN, 1);
+
+  // System Specs Diagnostics
+  drawText(30, 98,  "> HARDWARE: ARDUINO NANO ESP32 (ESP32-S3)", COLOR_WHITE, 1);
+  drawText(30, 115, "> DISPLAY : 3.5\" ILI9488 IPS (8-BIT PARALLEL BUS)", COLOR_WHITE, 1);
+  drawText(30, 132, "> NETWORK : IEEE 802.11 b/g/n [sakshyam]", COLOR_WHITE, 1);
+  drawText(30, 149, "> GATEWAY : LEVEL 2 REGIONAL PEOC COMMAND KIOSK", COLOR_CYAN, 1);
+  drawText(30, 166, "> SERVER  : https://zenithkandel.com.np/hydra", COLOR_WHITE, 1);
+
+  // Progress Bar Frame
+  drawRect(30, 195, screenWidth - 60, 24, COLOR_WHITE);
+  fillRect(32, 197, screenWidth - 64, 20, COLOR_BLACK);
+
+  // Progress Bar Fill
+  int fillW = (int)((screenWidth - 68) * (progressPct / 100.0f));
+  if (fillW > 0) {
+    fillRect(34, 199, fillW, 16, COLOR_CYAN);
+  }
+
+  // Status message below bar
+  char pctBuf[16];
+  snprintf(pctBuf, sizeof(pctBuf), "%d%%", progressPct);
+  drawText(30, 228, statusMsg, COLOR_WHITE, 1);
+  drawText(screenWidth - 65, 228, pctBuf, COLOR_CYAN, 1);
+
+  // Microcontroller & Firmware info
+  drawTextCentered(265, "POKHARA EMERGENCY OPERATIONS CENTER - DISASTER RADAR", COLOR_DARK_GRAY, 1);
+  drawTextCentered(282, "INITIALIZING PEOC TELEMETRY ENGINE & FIRMWARE V2.4", COLOR_DARK_GRAY, 1);
+}
+
+// 7.2. NORMAL DATA SCREEN (Displays All Stations When Nominal)
+void renderNormalDataScreen() {
+  fillScreen(COLOR_BG);
+
+  // 1. TOP HEADER (Y: 0 to 24)
+  fillRect(0, 0, screenWidth, 24, COLOR_PANEL);
+  drawHLine(0, 24, screenWidth, COLOR_BORDER);
+  drawText(8, 7, "HYDRA // PEOC REGIONAL COMMAND KIOSK", COLOR_ACCENT, 1);
+
+  String syncStatus = "SYNC: " + String(liveSummary.lastLatencyMs) + "ms | " + 
+                      (liveSummary.lastHttpCode == 200 ? "200 OK" : ("HTTP " + String(liveSummary.lastHttpCode)));
+  drawText(screenWidth - (syncStatus.length() * 6) - 8, 7, syncStatus.c_str(), 
+           liveSummary.lastHttpCode == 200 ? COLOR_GREEN : COLOR_RED, 1);
+
+  // 2. NOMINAL STATUS BANNER (Y: 28 to 54)
+  fillRect(6, 28, screenWidth - 12, 26, RGB565(0, 35, 15));
+  drawRect(6, 28, screenWidth - 12, 26, COLOR_GREEN);
+  drawTextCentered(34, "[ ALL STATIONS NOMINAL - BASIN SECURE ]", COLOR_GREEN, 2);
+
+  // 3. THREE STATION TELEMETRY CARDS (Y: 58 to 242)
+  int cardY = 58;
+  int cardH = 184;
+  int cardW = 152;
+  int gap = 6;
+
+  // --- CARD 1: FLOOD NODE (X: 6) ---
+  int c1X = 6;
+  drawRect(c1X, cardY, cardW, cardH, COLOR_CYAN);
+  fillRect(c1X + 2, cardY + 2, cardW - 4, 20, COLOR_PANEL);
+  drawHLine(c1X, cardY + 22, cardW, COLOR_CYAN);
+  drawText(c1X + 6, cardY + 7, "01 // FLOOD GAUGE", COLOR_CYAN, 1);
+  drawText(c1X + cardW - 45, cardY + 7, liveFlood.status.c_str(), COLOR_WHITE, 1);
+
+  drawText(c1X + 8, cardY + 30, "WATER DEPTH:", COLOR_WHITE, 1);
+  String floodDepthStr = String(liveFlood.waterDepthCm, 1) + " cm";
+  drawText(c1X + 8, cardY + 44, floodDepthStr.c_str(), COLOR_WHITE, 2);
+
+  drawText(c1X + 8, cardY + 74, "CLEARANCE:", COLOR_WHITE, 1);
+  String floodClearStr = String(liveFlood.distCm, 1) + " cm";
+  drawText(c1X + 8, cardY + 88, floodClearStr.c_str(), COLOR_WHITE, 1);
+
+  drawText(c1X + 8, cardY + 110, "RADAR ZONE:", COLOR_WHITE, 1);
+  String zoneTrunc = liveFlood.zone;
+  if (zoneTrunc.length() > 14) zoneTrunc = zoneTrunc.substring(0, 14);
+  drawText(c1X + 8, cardY + 124, zoneTrunc.c_str(), COLOR_CYAN, 1);
+
+  drawText(c1X + 8, cardY + 146, "HAZARD LEVEL:", COLOR_WHITE, 1);
+  drawText(c1X + 8, cardY + 160, liveFlood.hazard.c_str(), COLOR_GREEN, 1);
+
+  // --- CARD 2: FIRE & AIR (X: 164) ---
+  int c2X = c1X + cardW + gap;
+  drawRect(c2X, cardY, cardW, cardH, COLOR_AMBER);
+  fillRect(c2X + 2, cardY + 2, cardW - 4, 20, COLOR_PANEL);
+  drawHLine(c2X, cardY + 22, cardW, COLOR_AMBER);
+  drawText(c2X + 6, cardY + 7, "02 // FIRE & AIR", COLOR_AMBER, 1);
+  drawText(c2X + cardW - 45, cardY + 7, liveFire.status.c_str(), COLOR_WHITE, 1);
+
+  drawText(c2X + 8, cardY + 30, "TEMPERATURE:", COLOR_WHITE, 1);
+  String tempStr = String(liveFire.tempC, 1) + " C";
+  drawText(c2X + 8, cardY + 44, tempStr.c_str(), COLOR_WHITE, 2);
+
+  drawText(c2X + 8, cardY + 74, "HUMIDITY:", COLOR_WHITE, 1);
+  String humStr = String(liveFire.humidity, 1) + " %";
+  drawText(c2X + 8, cardY + 88, humStr.c_str(), COLOR_WHITE, 1);
+
+  drawText(c2X + 8, cardY + 110, "GAS POLLUTION:", COLOR_WHITE, 1);
+  String gasStr = String(liveFire.gasPpm, 1) + " PPM";
+  drawText(c2X + 8, cardY + 124, gasStr.c_str(), COLOR_AMBER, 1);
+
+  drawText(c2X + 8, cardY + 146, "AIR QUALITY:", COLOR_WHITE, 1);
+  String airTrunc = liveFire.airQuality;
+  if (airTrunc.length() > 14) airTrunc = airTrunc.substring(0, 14);
+  drawText(c2X + 8, cardY + 160, airTrunc.c_str(), COLOR_WHITE, 1);
+
+  // --- CARD 3: LANDSLIDE & IMU (X: 322) ---
+  int c3X = c2X + cardW + gap;
+  drawRect(c3X, cardY, cardW, cardH, COLOR_GREEN);
+  fillRect(c3X + 2, cardY + 2, cardW - 4, 20, COLOR_PANEL);
+  drawHLine(c3X, cardY + 22, cardW, COLOR_GREEN);
+  drawText(c3X + 6, cardY + 7, "03 // LANDSLIDE", COLOR_GREEN, 1);
+  drawText(c3X + cardW - 45, cardY + 7, liveLandslide.status.c_str(), COLOR_WHITE, 1);
+
+  drawText(c3X + 8, cardY + 30, "SURFACE ACCEL:", COLOR_WHITE, 1);
+  String accelStr = String(liveLandslide.accelG, 2) + " g";
+  drawText(c3X + 8, cardY + 44, accelStr.c_str(), COLOR_WHITE, 2);
+
+  drawText(c3X + 8, cardY + 74, "INCLINATION:", COLOR_WHITE, 1);
+  String tiltStr = "P:" + String(liveLandslide.pitch, 1) + " R:" + String(liveLandslide.roll, 1);
+  drawText(c3X + 8, cardY + 88, tiltStr.c_str(), COLOR_WHITE, 1);
+
+  drawText(c3X + 8, cardY + 110, "GPS STATUS:", COLOR_WHITE, 1);
+  String gpsStr = String(liveLandslide.satellites) + " Sats " + (liveLandslide.gpsFix ? "[FIX]" : "[SEARCH]");
+  drawText(c3X + 8, cardY + 124, gpsStr.c_str(), liveLandslide.gpsFix ? COLOR_GREEN : COLOR_AMBER, 1);
+
+  drawText(c3X + 8, cardY + 146, "LOCATION:", COLOR_WHITE, 1);
+  String locStr = String(liveLandslide.lat, 2) + "N " + String(liveLandslide.lng, 2) + "E";
+  drawText(c3X + 8, cardY + 160, locStr.c_str(), COLOR_WHITE, 1);
+
+  // 4. VILLAGE MASTER DISPATCH BAR (Y: 248 to 292)
+  drawRect(6, 248, screenWidth - 12, 46, COLOR_BORDER);
+  fillRect(8, 250, screenWidth - 16, 42, COLOR_PANEL);
+  
+  String sirenStr = "VILLAGE SIREN: [ STANDBY OFF ]";
+  drawText(14, 256, sirenStr.c_str(), COLOR_GREEN, 1);
+
+  String gsmStr = "GATEWAY: " + liveSummary.gsmStatus;
+  drawText(260, 256, gsmStr.c_str(), COLOR_CYAN, 1);
+
+  String regionStr = "BASIN: " + liveSummary.region;
+  drawText(14, 274, regionStr.c_str(), COLOR_WHITE, 1);
+
+  String uplinkStr = "UPLINKS: " + String(liveSummary.fetchSuccessCount) + " OK";
+  drawText(screenWidth - (uplinkStr.length() * 6) - 14, 274, uplinkStr.c_str(), COLOR_GREEN, 1);
+
+  // 5. FOOTER (Y: 298 to 320)
+  fillRect(0, screenHeight - 22, screenWidth, 22, COLOR_PANEL);
+  drawHLine(0, screenHeight - 23, screenWidth, COLOR_BORDER);
+
+  String ipStr = "IP: " + WiFi.localIP().toString() + " | http://tft-display.local";
+  drawText(8, screenHeight - 15, ipStr.c_str(), COLOR_WHITE, 1);
+
+  char upBuf[32];
+  unsigned long sec = millis() / 1000;
+  snprintf(upBuf, sizeof(upBuf), "UP: %02lu:%02lu:%02lu", sec / 3600, (sec % 3600) / 60, sec % 60);
+  drawText(screenWidth - 85, screenHeight - 15, upBuf, COLOR_ACCENT, 1);
+}
+
+// 7.3. EMERGENCY ALERT POP-UP OVERLAY SCREEN (Triggered On Breach)
+void renderAlertPopUpScreen() {
+  fillScreen(COLOR_BLACK);
+
+  // Flashing strobe double border
+  static bool strobe = false;
+  strobe = !strobe;
+  uint16_t strobeColor = strobe ? COLOR_RED : COLOR_AMBER;
+  drawRect(0, 0, screenWidth, screenHeight, strobeColor);
+  drawRect(2, 2, screenWidth - 4, screenHeight - 4, strobeColor);
+
+  // 1. TOP DANGER HEADER BANNER (Y: 6 to 52)
+  fillRect(6, 6, screenWidth - 12, 46, COLOR_RED);
+  drawRect(6, 6, screenWidth - 12, 46, COLOR_WHITE);
+  drawTextCentered(14, "! CRITICAL DISASTER EMERGENCY ALERT !", COLOR_WHITE, 2);
+  drawTextCentered(34, "IMMEDIATE EVACUATION & DEFENSE PROTOCOL ACTIVE", COLOR_WHITE, 1);
+
+  // 2. CENTRAL ALERT POP-UP MODAL BOX (X: 12, Y: 58, W: 456, H: 176)
+  fillRect(12, 58, screenWidth - 24, 176, RGB565(30, 0, 0));
+  drawRect(12, 58, screenWidth - 24, 176, COLOR_RED);
+  drawRect(14, 60, screenWidth - 28, 172, COLOR_RED);
+
+  drawText(24, 68, ">> ACTIVE EMERGENCY BREACH DIAGNOSTICS:", COLOR_WHITE, 1);
+  drawHLine(24, 80, screenWidth - 48, COLOR_RED);
+
+  int lineY = 88;
+  // Flood breach line
+  if (liveFlood.hazard == "CRITICAL" || liveFlood.hazard == "HIGH" || liveFlood.waterDepthCm > 200) {
+    String fMsg = "! FLOOD SURGE BREACH: WATER DEPTH " + String(liveFlood.waterDepthCm, 1) + " cm (CRITICAL OVERFLOW)";
+    drawText(24, lineY, fMsg.c_str(), COLOR_RED, 1);
+    lineY += 16;
+  }
+
+  // Landslide breach line
+  if (liveLandslide.hazard == "CRITICAL" || liveLandslide.hazard == "HIGH" || liveLandslide.accelG > 1.2 || abs(liveLandslide.pitch) > 3.0) {
+    String lMsg = "! LANDSLIDE DETECTED: ACCEL " + String(liveLandslide.accelG, 2) + "g | TILT P:" + String(liveLandslide.pitch, 1) + " R:" + String(liveLandslide.roll, 1);
+    drawText(24, lineY, lMsg.c_str(), COLOR_RED, 1);
+    lineY += 16;
+  }
+
+  // Fire breach line
+  if (liveFire.hazard == "CRITICAL" || liveFire.hazard == "HIGH" || liveFire.gasPpm > 100 || liveFire.tempC > 40) {
+    String frMsg = "! FIRE / GAS HAZARD: " + String(liveFire.gasPpm, 1) + " PPM | TEMP: " + String(liveFire.tempC, 1) + " C";
+    drawText(24, lineY, frMsg.c_str(), COLOR_RED, 1);
+    lineY += 16;
+  }
+
+  if (lineY == 88) {
+    drawText(24, lineY, "! GENERAL PEOC ALARM DISPATCH TRIGGERED FROM SERVER !", COLOR_RED, 1);
+    lineY += 16;
+  }
+
+  drawHLine(24, 138, screenWidth - 48, COLOR_DARK_GRAY);
+
+  // Hardware Dispatch Actions
+  drawText(24, 146, "VILLAGE SIREN : [ ! RELAY TRIGGERED - RUNNING CONTINUOUSLY ! ]", COLOR_WHITE, 1);
+  drawText(24, 162, "CELLULAR SMS  : [ ALERT DISPATCHED VIA SIM800L CELLULAR NET ]", COLOR_CYAN, 1);
+  drawText(24, 178, "TARGET REGION : " + liveSummary.region, COLOR_WHITE, 1);
+  drawText(24, 194, "ACTION ORDER  : EVACUATE TO DESIGNATED HIGH GROUND IMMEDIATELY", COLOR_AMBER, 1);
+  drawText(24, 210, "EMERGENCY SAR : ARMED POLICE FORCE (1114) / RED CROSS (1130)", COLOR_GREEN, 1);
+
+  // 3. LIVE SENSOR MINI-STRIP (Y: 240 to 288)
+  drawRect(12, 240, screenWidth - 24, 48, COLOR_BORDER);
+  fillRect(14, 242, screenWidth - 28, 44, COLOR_PANEL);
+
+  String fStrip = "FLOOD: " + String(liveFlood.waterDepthCm, 1) + "cm";
+  drawText(20, 249, fStrip.c_str(), liveFlood.hazard == "CRITICAL" ? COLOR_RED : COLOR_WHITE, 1);
+
+  String frStrip = "TEMP: " + String(liveFire.tempC, 1) + "C | GAS: " + String(liveFire.gasPpm, 0) + "PPM";
+  drawText(160, 249, frStrip.c_str(), liveFire.hazard == "CRITICAL" ? COLOR_RED : COLOR_WHITE, 1);
+
+  String lStrip = "IMU: " + String(liveLandslide.accelG, 2) + "g | " + String(liveLandslide.satellites) + "Sats";
+  drawText(330, 249, lStrip.c_str(), liveLandslide.hazard == "CRITICAL" ? COLOR_RED : COLOR_WHITE, 1);
+
+  String subStrip = "PEOC COMMAND KIOSK • SERVER UPLINK: " + String(liveSummary.lastLatencyMs) + "ms • HTTP " + String(liveSummary.lastHttpCode);
+  drawText(20, 269, subStrip.c_str(), COLOR_CYAN, 1);
+
+  // 4. FOOTER (Y: 294 to 320)
+  fillRect(0, screenHeight - 22, screenWidth, 22, COLOR_PANEL);
+  drawHLine(0, screenHeight - 23, screenWidth, COLOR_BORDER);
+
+  String alertFooter = "ALERT OVERLAY ACTIVE • AUTO-DISMISSES WHEN ALL HAZARDS CLEAR";
+  drawText(10, screenHeight - 15, alertFooter.c_str(), COLOR_WHITE, 1);
+
+  char upBuf[32];
+  unsigned long sec = millis() / 1000;
+  snprintf(upBuf, sizeof(upBuf), "UP: %02lu:%02lu:%02lu", sec / 3600, (sec % 3600) / 60, sec % 60);
+  drawText(screenWidth - 85, screenHeight - 15, upBuf, COLOR_ACCENT, 1);
+}
+
+void renderDisplay() {
+  bool isAlert = liveSummary.isEmergency || 
+                 (liveFlood.hazard == "CRITICAL" || liveFlood.hazard == "HIGH") ||
+                 (liveLandslide.hazard == "CRITICAL" || liveLandslide.hazard == "HIGH") ||
+                 (liveFire.hazard == "CRITICAL" || liveFire.hazard == "HIGH");
+
+  if (isAlert) {
+    renderAlertPopUpScreen();
+  } else {
+    renderNormalDataScreen();
+  }
+}
+
+/* ====================================================================
+ * 8. EMBEDDED HIGH-CONTRAST WEB DASHBOARD
  * ==================================================================== */
 const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ESP32 // TELEMETRY NODE</title>
+  <title>ILI9488 3.5" PARALLEL TFT DASHBOARD</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; border-radius: 0 !important; }
-    body { background-color: #000000; color: #FFFFFF; font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, "Courier New", monospace; padding: 16px; line-height: 1.35; -webkit-font-smoothing: antialiased; }
-    .container { max-width: 1200px; margin: 0 auto; }
+    body { background: #000000; color: #FFFFFF; font-family: ui-monospace, Menlo, Consolas, monospace; padding: 16px; line-height: 1.35; }
+    .container { max-width: 960px; margin: 0 auto; }
     header { border: 1px solid #FFFFFF; padding: 16px; margin-bottom: 16px; background: #050505; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; }
-    .title-group h1 { font-size: 18px; letter-spacing: 2px; font-weight: 900; text-transform: uppercase; }
-    .title-group p { font-size: 11px; color: #888888; letter-spacing: 1px; margin-top: 2px; }
-    .sys-badges { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .title-group h1 { font-size: 17px; letter-spacing: 2px; font-weight: 900; text-transform: uppercase; }
+    .title-group p { font-size: 11px; color: #888888; letter-spacing: 1px; margin-top: 3px; }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; border: 1px solid #FFFFFF; text-decoration: none; }
     .badge.solid { background: #FFFFFF; color: #000000; }
     .badge.outline { background: #000000; color: #FFFFFF; }
-    .badge.warn { border-style: dashed; color: #FFFFFF; background: #1A1A1A; }
-    .badge.link { background: #000000; color: #FFFFFF; border-color: #FFFFFF; cursor: pointer; }
+    .badge.link { background: #000000; color: #FFFFFF; cursor: pointer; }
     .badge.link:hover { background: #FFFFFF; color: #000000; }
     .pulse { display: inline-block; width: 8px; height: 8px; background: #000000; animation: blink 1s steps(1) infinite; }
-    .badge.outline .pulse { background: #FFFFFF; }
     @keyframes blink { 50% { opacity: 0; } }
-    .section-title { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; font-weight: 900; border-left: 4px solid #FFFFFF; padding-left: 8px; margin: 20px 0 10px 0; display: flex; justify-content: space-between; align-items: center; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-bottom: 16px; }
-    .card { border: 1px solid #333333; background: #080808; padding: 14px; position: relative; }
-    .card:hover { border-color: #FFFFFF; }
-    .card-label { font-size: 10px; color: #777777; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; margin-bottom: 6px; display: flex; justify-content: space-between; }
-    .card-value { font-size: 24px; font-weight: 800; letter-spacing: 0.5px; color: #FFFFFF; word-break: break-all; }
-    .card-sub { font-size: 11px; color: #888888; margin-top: 4px; font-weight: 500; }
+    .section-title { font-size: 12px; letter-spacing: 2px; text-transform: uppercase; font-weight: 900; border-left: 4px solid #FFFFFF; padding-left: 8px; margin: 20px 0 10px 0; display: flex; justify-content: space-between; }
+    
+    .preview-card { border: 2px solid #FFFFFF; background: #080808; padding: 20px; margin-bottom: 16px; }
+    .preview-label { font-size: 10px; color: #777; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; margin-bottom: 6px; display: flex; justify-content: space-between; }
+    .screen-mock { background: #000000; border: 1px solid #444444; padding: 18px; min-height: 120px; }
+    .screen-mock h2 { font-size: 20px; font-weight: 900; letter-spacing: 1px; margin-bottom: 8px; color: #FFFFFF; }
+    .screen-mock p { font-size: 14px; color: #CCCCCC; white-space: pre-wrap; word-break: break-word; }
+
+    .form-panel { border: 1px solid #FFFFFF; background: #050505; padding: 20px; margin-bottom: 16px; }
+    .form-group { margin-bottom: 14px; }
+    .form-group label { display: block; font-size: 10px; color: #888888; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; margin-bottom: 6px; }
+    input[type=text], textarea, select { width: 100%; background: #000000; color: #FFFFFF; border: 1px solid #444444; padding: 12px 14px; font-family: inherit; font-size: 14px; font-weight: 700; outline: none; }
+    input[type=text]:focus, textarea:focus, select:focus { border-color: #FFFFFF; }
+    textarea { resize: vertical; min-height: 100px; }
+    .ctrl-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
+    
+    .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+    .btn { flex: 1; min-width: 140px; padding: 12px 18px; font-size: 11px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; color: #000000; background: #FFFFFF; border: 1px solid #FFFFFF; cursor: pointer; text-align: center; }
+    .btn:hover { background: #000000; color: #FFFFFF; }
+    .btn.outline { background: #000000; color: #FFFFFF; border-color: #444444; }
+    .btn.outline:hover { border-color: #FFFFFF; }
+
+    .preset-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    .chip { font-size: 9px; background: #111111; border: 1px solid #333333; padding: 6px 10px; cursor: pointer; text-transform: uppercase; font-weight: 700; }
+    .chip:hover { border-color: #FFFFFF; }
+
     .table-container { border: 1px solid #333333; background: #080808; overflow-x: auto; margin-bottom: 16px; }
     table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
     th, td { padding: 10px 14px; border-bottom: 1px solid #222222; border-right: 1px solid #222222; }
     th:last-child, td:last-child { border-right: none; }
     tr:last-child td { border-bottom: none; }
-    th { background: #111111; color: #999999; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; font-weight: 700; }
+    th { background: #111111; color: #888888; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; font-weight: 700; }
     td.num { font-weight: 700; color: #FFFFFF; font-size: 13px; }
-    .gauge-wrapper { margin-top: 6px; height: 6px; background: #222222; position: relative; }
-    .gauge-fill { height: 100%; background: #FFFFFF; width: 50%; transition: width 0.15s linear; }
-    .btn { display: inline-block; padding: 8px 14px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; color: #000000; background: #FFFFFF; border: 1px solid #FFFFFF; text-decoration: none; cursor: pointer; margin-top: 8px; }
-    .btn:hover { background: #000000; color: #FFFFFF; }
-    .btn.disabled { background: #222222; color: #666666; border-color: #333333; pointer-events: none; }
-    footer { border-top: 1px solid #333333; padding: 14px 0; font-size: 10px; color: #666666; display: flex; justify-content: space-between; align-items: center; letter-spacing: 1px; text-transform: uppercase; flex-wrap: wrap; gap: 8px; }
+
+    footer { border-top: 1px solid #333333; padding: 14px 0; font-size: 10px; color: #666666; display: flex; justify-content: space-between; letter-spacing: 1px; text-transform: uppercase; flex-wrap: wrap; gap: 8px; }
     footer a { color: #FFFFFF; text-decoration: none; border-bottom: 1px solid #FFFFFF; }
-    footer a:hover { background: #FFFFFF; color: #000000; }
-    .alert-box { border: 1px solid #FFFFFF; background: #000000; padding: 10px 14px; font-size: 11px; margin-bottom: 12px; display: none; }
-    .alert-box.active { display: block; }
   </style>
 </head>
 <body>
   <div class="container">
+    
     <header>
       <div class="title-group">
-        <h1>ESP32 // TELEMETRY MONITOR</h1>
-        <p>HARDWARE SERIAL2 (NEO-6M) &bull; I2C BUS (MPU-6050) &bull; DUAL OTA ACTIVE</p>
+        <h1>HYDRA // PEOC COMMAND KIOSK</h1>
+        <p>3.5" IPS PANEL &bull; 8-BIT DIRECT PARALLEL BUS &bull; TELEMETRY MIRROR</p>
       </div>
-      <div class="sys-badges">
-        <span id="conn-badge" class="badge solid"><span class="pulse"></span> LIVE COMMS</span>
-        <span id="server-badge" class="badge outline">CLOUD: STANDBY</span>
-        <span id="gps-lock-badge" class="badge warn">GPS: CHECKING...</span>
-        <span id="mpu-status-badge" class="badge outline">MPU: DETECTING</span>
-        <a href="/update" class="badge link">&#9889; WEB OTA REFLASH</a>
+      <div class="badges">
+        <span class="badge solid"><span class="pulse"></span> LIVE COMMS</span>
+        <a href="/api/refresh" class="badge link">&#128260; REFRESH</a>
+        <a href="/update" class="badge link">&#9889; WEB OTA</a>
       </div>
     </header>
 
-    <div id="error-banner" class="alert-box">
-      [ALERT] <span id="error-msg">SYSTEM INITIALIZING...</span>
+    <div class="preview-card">
+      <div class="preview-label">
+        <span>CURRENT SYSTEM STATUS</span>
+        <span id="sys-status-badge">ONLINE</span>
+      </div>
+      <div class="screen-mock">
+        <h2 id="modal-title">HYDRA DISASTER COMMAND ACTIVE</h2>
+        <p id="modal-desc">Streaming live telemetry from all Level 0 nodes...</p>
+      </div>
     </div>
 
-    <!-- 1. GPS TELEMETRY & HARDWARE HEALTH MONITOR -->
+    <!-- LIVE STATIONS TABLE -->
     <div class="section-title">
-      <span>01 // NEO-6M GPS HARDWARE &amp; SATELLITE TELEMETRY</span>
-      <span id="gps-updated-tag" style="font-size: 10px; color: #888;">WAITING FOR NMEA...</span>
-    </div>
-
-    <!-- GPS HARDWARE & CONSTELLATION HEALTH BANNER -->
-    <div class="card" style="margin-bottom: 14px; border: 1px solid #FFFFFF; background: #050505;">
-      <div class="card-label"><span>GPS HARDWARE &amp; CONSTELLATION DIAGNOSTICS</span><span>DIRECT UART2 TELEMETRY</span></div>
-      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 6px;">
-        <div>
-          <div style="font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px;">01. HARDWARE STATUS (IS SENSOR ALIVE?):</div>
-          <div id="gps-hw-status" style="font-size: 15px; font-weight: 900; letter-spacing: 1px;">CHECKING HARDWARE COMMS...</div>
-        </div>
-        <div>
-          <div style="font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px;">02. SATELLITE SEARCH &amp; LOCK STAGE:</div>
-          <div id="gps-fix-stage" style="font-size: 15px; font-weight: 900; letter-spacing: 1px;">INITIALIZING PARSER...</div>
-        </div>
-      </div>
-      <div id="gps-status-detail" style="margin-top: 12px; padding: 10px 12px; background: #101010; border: 1px solid #333; font-size: 11px; color: #DDDDDD; line-height: 1.45;">
-        MONITORING SERIAL PACKETS ON GPIO16 (RX2)...
-      </div>
-    </div>
-
-    <div class="grid">
-      <div class="card">
-        <div class="card-label"><span>COORDINATES (WGS84)</span><span>LAT / LON</span></div>
-        <div class="card-value" id="gps-coords">--.------, --.------</div>
-        <div class="card-sub" id="gps-coords-detail">NO ACTIVE POSITION FIX</div>
-        <a id="maps-link" href="#" target="_blank" class="btn disabled">OPEN ON GOOGLE MAPS</a>
-      </div>
-
-      <div class="card">
-        <div class="card-label"><span>GROUND SPEED</span><span>VELOCITY</span></div>
-        <div class="card-value"><span id="gps-speed-kmh">--.-</span> <span style="font-size: 13px;">KM/H</span></div>
-        <div class="card-sub"><span id="gps-speed-mph">--.-</span> MPH &bull; COURSE: <span id="gps-course">--&deg;</span> (<span id="gps-cardinal">--</span>)</div>
-      </div>
-
-      <div class="card">
-        <div class="card-label"><span>ALTITUDE / ACCURACY</span><span>HDOP</span></div>
-        <div class="card-value"><span id="gps-alt-m">--.-</span> <span style="font-size: 13px;">M</span></div>
-        <div class="card-sub"><span id="gps-alt-ft">--.-</span> FT &bull; HDOP: <span id="gps-hdop">--.-</span> (LOWER IS BETTER)</div>
-      </div>
-
-      <div class="card">
-        <div class="card-label"><span>CONSTELLATION STATS</span><span>TRACKING</span></div>
-        <div class="card-value"><span id="gps-sats">0</span> <span style="font-size: 13px;">SATELLITES</span></div>
-        <div class="card-sub">FIX AGE: <span id="gps-age">--</span> MS &bull; RX BYTES: <span id="gps-chars">0</span></div>
-      </div>
-    </div>
-
-    <!-- GPS TIME & NMEA DIAGNOSTICS TABLE -->
-    <div class="table-container">
-      <table>
-        <thead>
-          <tr>
-            <th>UTC DATE</th>
-            <th>UTC TIME (ZULU)</th>
-            <th>CHARS PROCESSED</th>
-            <th>CHECKSUM FAILURES</th>
-            <th>RAW SENTENCES WITH FIX</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td id="gps-date" class="num">----/--/--</td>
-            <td id="gps-time" class="num">--:--:--</td>
-            <td id="gps-chars-diag" class="num">0</td>
-            <td id="gps-cs-fail" class="num">0</td>
-            <td id="gps-fix-stat" class="num">NO FIX YET</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- 2. MPU-6050 IMU TELEMETRY -->
-    <div class="section-title">
-      <span>02 // MPU-6050 6-AXIS INERTIAL SENSOR</span>
-      <span id="mpu-updated-tag" style="font-size: 10px; color: #888;">I2C 0x68</span>
-    </div>
-
-    <div class="grid">
-      <div class="card">
-        <div class="card-label"><span>ACCELEROMETER (TOTAL)</span><span>G-FORCE</span></div>
-        <div class="card-value"><span id="mpu-accel-total">--.-</span> <span style="font-size: 13px;">G</span></div>
-        <div class="card-sub">NORMAL GRAVITY BASELINE ~1.00 G</div>
-      </div>
-
-      <div class="card">
-        <div class="card-label"><span>ATTITUDE (PITCH / ROLL)</span><span>INCLINATION</span></div>
-        <div class="card-value"><span id="mpu-pitch">--.-</span>&deg; / <span id="mpu-roll">--.-</span>&deg;</div>
-        <div class="card-sub">COMPUTED FROM REAL-TIME ACCELEROMETER VECTORS</div>
-        <div class="gauge-wrapper"><div id="pitch-gauge" class="gauge-fill"></div></div>
-      </div>
-
-      <div class="card">
-        <div class="card-label"><span>IMU DIE TEMPERATURE</span><span>ON-CHIP</span></div>
-        <div class="card-value"><span id="mpu-temp-c">--.-</span> <span style="font-size: 13px;">&deg;C</span></div>
-        <div class="card-sub"><span id="mpu-temp-f">--.-</span> &deg;F (INTERNAL SENSOR TEMP)</div>
-      </div>
-    </div>
-
-    <!-- DETAILED 6-DOF AXIS BREAKDOWN TABLE -->
-    <div class="table-container">
-      <table>
-        <thead>
-          <tr>
-            <th>AXIS</th>
-            <th>ACCELERATION (m/s&sup2;)</th>
-            <th>ACCELERATION (G)</th>
-            <th>ANGULAR VELOCITY (&deg;/s)</th>
-            <th>ANGULAR VELOCITY (rad/s)</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <th style="color:#FFF;">X-AXIS</th>
-            <td id="mpu-ax-ms" class="num">--.---</td>
-            <td id="mpu-ax-g" class="num">--.---</td>
-            <td id="mpu-gx-deg" class="num">--.---</td>
-            <td id="mpu-gx-rad" class="num">--.---</td>
-          </tr>
-          <tr>
-            <th style="color:#FFF;">Y-AXIS</th>
-            <td id="mpu-ay-ms" class="num">--.---</td>
-            <td id="mpu-ay-g" class="num">--.---</td>
-            <td id="mpu-gy-deg" class="num">--.---</td>
-            <td id="mpu-gy-rad" class="num">--.---</td>
-          </tr>
-          <tr>
-            <th style="color:#FFF;">Z-AXIS</th>
-            <td id="mpu-az-ms" class="num">--.---</td>
-            <td id="mpu-az-g" class="num">--.---</td>
-            <td id="mpu-gz-deg" class="num">--.---</td>
-            <td id="mpu-gz-rad" class="num">--.---</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- 3. HYDRA CLOUD SERVER INGEST (a.md / Production API) -->
-    <div class="section-title">
-      <span>03 // HYDRA CLOUD SERVER INGEST (PRODUCTION TELEMETRY)</span>
-      <span id="server-updated-tag" style="font-size: 10px; color: #888;">STANDBY</span>
+      <span>01 // REAL-TIME STATION TELEMETRY</span>
+      <span id="last-sync-tag">SYNCING...</span>
     </div>
 
     <div class="table-container">
       <table>
         <thead>
           <tr>
-            <th>TARGET API ENDPOINT</th>
-            <th>UPLINK STATUS</th>
-            <th>LATENCY</th>
-            <th>SUCCESS</th>
-            <th>FAIL</th>
-            <th>LAST SERVER RESPONSE</th>
+            <th>STATION</th>
+            <th>STATUS</th>
+            <th>PRIMARY METRIC</th>
+            <th>SECONDARY METRIC</th>
+            <th>HAZARD LEVEL</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody id="telemetry-table-body">
           <tr>
-            <td id="srv-url" style="color:#FFF; word-break:break-all;">https://zenithkandel.com.np/hydra/backend/api/telemetry/landslide.php</td>
-            <td id="srv-status" class="num">CONNECTING...</td>
-            <td id="srv-latency" class="num">-- ms</td>
-            <td id="srv-ok" class="num">0</td>
-            <td id="srv-fail" class="num">0</td>
-            <td id="srv-resp" style="font-size:11px; color:#AAA; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">WAITING FOR FIRST UPLINK</td>
+            <td style="color:#00D4FF; font-weight:bold;">01 // FLOOD GAUGE</td>
+            <td id="t-flood-status" class="num">CONNECTING</td>
+            <td id="t-flood-depth" class="num">-- cm</td>
+            <td id="t-flood-clear" class="num">-- cm</td>
+            <td id="t-flood-hazard" class="num">--</td>
           </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- 4. SYSTEM & OTA DIAGNOSTICS -->
-    <div class="table-container">
-      <table>
-        <thead>
           <tr>
-            <th>IP ADDRESS</th>
-            <th>WI-FI RSSI</th>
-            <th>SYSTEM UPTIME</th>
-            <th>FREE HEAP</th>
-            <th>OTA SERVICE</th>
+            <td style="color:#FFB800; font-weight:bold;">02 // FIRE &amp; AIR</td>
+            <td id="t-fire-status" class="num">CONNECTING</td>
+            <td id="t-fire-temp" class="num">-- °C</td>
+            <td id="t-fire-gas" class="num">-- PPM</td>
+            <td id="t-fire-hazard" class="num">--</td>
           </tr>
-        </thead>
-        <tbody>
           <tr>
-            <td id="sys-ip" class="num">---.---.---.---</td>
-            <td id="sys-rssi" class="num">-- dBm</td>
-            <td id="sys-uptime" class="num">00:00:00</td>
-            <td id="sys-heap" class="num">-- KB</td>
-            <td class="num"><a href="/update" style="color:#FFF; text-decoration: underline;">READY AT /update</a></td>
+            <td style="color:#00FF87; font-weight:bold;">03 // LANDSLIDE</td>
+            <td id="t-land-status" class="num">CONNECTING</td>
+            <td id="t-land-accel" class="num">-- g</td>
+            <td id="t-land-tilt" class="num">--</td>
+            <td id="t-land-hazard" class="num">--</td>
           </tr>
         </tbody>
       </table>
     </div>
 
     <footer>
-      <span>ESP32 MONOCHROME REAL TELEMETRY NODE &bull; DUAL OTA (WEB &amp; ARDUINOOTA)</span>
-      <span><a href="/update">[ FLASH FIRMWARE / OTA ]</a></span>
+      <span>HYDRA LEVEL 2 COMMAND KIOSK &bull; PEOC REGIONAL NETWORK</span>
+      <span><a href="/update">[ OVER-THE-AIR FIRMWARE UPDATE ]</a></span>
     </footer>
 
   </div>
 
   <script>
-    let failedFetches = 0;
-
-    async function pollTelemetry() {
+    async function pollStatus() {
       try {
-        const response = await fetch('/api/data');
-        if (!response.ok) throw new Error('HTTP ' + response.status);
-        const data = await response.json();
-        failedFetches = 0;
+        const res = await fetch('/api/status');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
 
-        document.getElementById('conn-badge').className = "badge solid";
-        document.getElementById('conn-badge').innerHTML = '<span class="pulse"></span> LIVE COMMS';
-        document.getElementById('error-banner').className = "alert-box";
+        // Flood
+        document.getElementById('t-flood-status').innerText = data.flood.status;
+        document.getElementById('t-flood-depth').innerText = data.flood.water_depth_cm + ' cm';
+        document.getElementById('t-flood-clear').innerText = 'Clear: ' + data.flood.dist_cm + ' cm';
+        document.getElementById('t-flood-hazard').innerText = data.flood.hazard;
 
-        document.getElementById('sys-ip').innerText = data.sys.ip;
-        document.getElementById('sys-rssi').innerText = data.sys.rssi + ' dBm';
-        document.getElementById('sys-uptime').innerText = formatUptime(data.sys.uptime_sec);
-        document.getElementById('sys-heap').innerText = Math.round(data.sys.free_heap / 1024) + ' KB';
+        // Fire
+        document.getElementById('t-fire-status').innerText = data.fire.status;
+        document.getElementById('t-fire-temp').innerText = data.fire.temp_c + ' °C (' + data.fire.humidity + '%)';
+        document.getElementById('t-fire-gas').innerText = data.fire.gas_ppm + ' PPM';
+        document.getElementById('t-fire-hazard').innerText = data.fire.hazard;
 
-        // 1. GPS TELEMETRY & HARDWARE HEALTH MONITOR
-        const gpsBadge = document.getElementById('gps-lock-badge');
-        const mapsLink = document.getElementById('maps-link');
+        // Landslide
+        document.getElementById('t-land-status').innerText = data.landslide.status;
+        document.getElementById('t-land-accel').innerText = data.landslide.accel_g + ' g';
+        document.getElementById('t-land-tilt').innerText = 'P:' + data.landslide.pitch + ' R:' + data.landslide.roll;
+        document.getElementById('t-land-hazard').innerText = data.landslide.hazard;
 
-        document.getElementById('gps-chars').innerText = data.gps.chars_rx;
-        document.getElementById('gps-chars-diag').innerText = data.gps.chars_rx;
-        document.getElementById('gps-cs-fail').innerText = data.gps.checksum_fail;
-        document.getElementById('gps-sats').innerText = data.gps.satellites;
-
-        // GPS ALIVE & SEARCH STATUS BANNER
-        const hwStatusEl = document.getElementById('gps-hw-status');
-        const fixStageEl = document.getElementById('gps-fix-stage');
-        const statusDetailEl = document.getElementById('gps-status-detail');
-
-        if (data.gps.hw_alive) {
-          const rxAgo = data.gps.last_rx_ms < 1000 ? '< 1s ago' : (Math.round(data.gps.last_rx_ms / 100) / 10 + 's ago');
-          hwStatusEl.innerHTML = '<span style="color:#FFF;">[ &#9679; ALIVE &amp; STREAMING ]</span> <span style="font-size:11px;color:#888;">(UART RX ' + rxAgo + ')</span>';
+        // Summary
+        document.getElementById('sys-status-badge').innerText = data.summary.status;
+        document.getElementById('last-sync-tag').innerText = 'LATENCY: ' + data.summary.latency_ms + 'ms';
+        
+        if (data.summary.emergency) {
+          document.getElementById('modal-title').innerHTML = '<span style="color:#FF3B3B;">! EMERGENCY ALERT ACTIVE !</span>';
+          document.getElementById('modal-desc').innerText = 'Breach active in region: ' + data.summary.region;
         } else {
-          hwStatusEl.innerHTML = '<span style="color:#FFF;border:1px dashed #FFF;padding:1px 6px;">[ &#10005; HARDWARE DEAD / NO RX ]</span>';
+          document.getElementById('modal-title').innerText = 'ALL STATIONS NOMINAL';
+          document.getElementById('modal-desc').innerText = 'Monitoring basin: ' + data.summary.region;
         }
-
-        fixStageEl.innerText = data.gps.fix_stage;
-        statusDetailEl.innerText = data.gps.status_detail;
-
-        if (data.gps.hw_alive === false) {
-          gpsBadge.className = "badge warn";
-          gpsBadge.innerText = "GPS: HARDWARE OFFLINE";
-          document.getElementById('gps-coords').innerText = "NO HARDWARE RX";
-          document.getElementById('gps-coords-detail').innerText = "VERIFY PIN 16 (RX2) -> GPS TX WIRING";
-          mapsLink.className = "btn disabled";
-          mapsLink.href = "#";
-          document.getElementById('gps-updated-tag').innerText = "NO HARDWARE DATA";
-        } else if (data.gps.fix === true) {
-          gpsBadge.className = "badge solid";
-          gpsBadge.innerText = "GPS: 3D FIX LOCKED (" + data.gps.satellites + " SATS)";
-          
-          const latStr = data.gps.lat.toFixed(6);
-          const lngStr = data.gps.lng.toFixed(6);
-          document.getElementById('gps-coords').innerText = latStr + ", " + lngStr;
-          document.getElementById('gps-coords-detail').innerText = "PRECISION FIX &bull; LAT " + latStr + "&deg; | LNG " + lngStr + "&deg;";
-          
-          mapsLink.className = "btn";
-          mapsLink.href = "https://www.google.com/maps?q=" + latStr + "," + lngStr;
-
-          document.getElementById('gps-speed-kmh').innerText = data.gps.speed_kmh.toFixed(1);
-          document.getElementById('gps-speed-mph').innerText = data.gps.speed_mph.toFixed(1);
-          document.getElementById('gps-course').innerText = data.gps.course_deg.toFixed(1) + "°";
-          document.getElementById('gps-cardinal').innerText = data.gps.cardinal || "--";
-          document.getElementById('gps-alt-m').innerText = data.gps.alt_m.toFixed(1);
-          document.getElementById('gps-alt-ft').innerText = data.gps.alt_ft.toFixed(1);
-          document.getElementById('gps-hdop').innerText = data.gps.hdop.toFixed(2);
-          document.getElementById('gps-date').innerText = data.gps.date;
-          document.getElementById('gps-time').innerText = data.gps.time;
-          document.getElementById('gps-fix-stat').innerText = "3D LOCK ACTIVE";
-          document.getElementById('gps-age').innerText = data.gps.fix_age_ms;
-          document.getElementById('gps-updated-tag').innerText = "NMEA VALID";
-        } else {
-          // GPS is transmitting NMEA sentences but searching for satellite constellation lock
-          gpsBadge.className = "badge warn";
-          if (data.gps.satellites > 0) {
-            gpsBadge.innerText = "GPS: ACQUIRING (" + data.gps.satellites + "/4 SATS)";
-          } else {
-            gpsBadge.innerText = "GPS: SEARCHING SATELLITES";
-          }
-          document.getElementById('gps-coords').innerText = "--.------, --.------";
-          document.getElementById('gps-coords-detail').innerText = data.gps.satellites > 0 ? ("TRACKING " + data.gps.satellites + " SATELLITE(S) - WAITING FOR 3D FIX...") : "SEARCHING FOR SATELLITES (MOVE ANTENNA NEAR WINDOW/OUTDOORS)";
-          
-          mapsLink.className = "btn disabled";
-          mapsLink.href = "#";
-
-          document.getElementById('gps-speed-kmh').innerText = "--.-";
-          document.getElementById('gps-speed-mph').innerText = "--.-";
-          document.getElementById('gps-course').innerText = "--°";
-          document.getElementById('gps-cardinal').innerText = "--";
-          document.getElementById('gps-alt-m').innerText = "--.-";
-          document.getElementById('gps-alt-ft').innerText = "--.-";
-          document.getElementById('gps-hdop').innerText = data.gps.hdop > 0 ? data.gps.hdop.toFixed(2) : "--.-";
-          document.getElementById('gps-date').innerText = data.gps.date || "----/--/--";
-          document.getElementById('gps-time').innerText = data.gps.time || "--:--:--";
-          document.getElementById('gps-fix-stat').innerText = data.gps.satellites > 0 ? ("TRACKING " + data.gps.satellites + " SATS (NO LOCK)") : "SEARCHING (0 FIX)";
-          document.getElementById('gps-age').innerText = data.gps.fix_age_ms > 0 ? data.gps.fix_age_ms : "--";
-          document.getElementById('gps-updated-tag').innerText = data.gps.satellites > 0 ? "ACQUIRING FIX" : "WAITING FOR SATELLITES";
-        }
-
-        // 2. MPU-6050 DATA (NO FAKE DATA)
-        const mpuBadge = document.getElementById('mpu-status-badge');
-        if (data.mpu.connected === true) {
-          mpuBadge.className = "badge solid";
-          mpuBadge.innerText = "MPU6050: ONLINE";
-          document.getElementById('mpu-updated-tag').innerText = "I2C OK (0x68)";
-
-          document.getElementById('mpu-accel-total').innerText = data.mpu.total_accel_g.toFixed(2);
-          document.getElementById('mpu-pitch').innerText = (data.mpu.pitch >= 0 ? "+" : "") + data.mpu.pitch.toFixed(1);
-          document.getElementById('mpu-roll').innerText = (data.mpu.roll >= 0 ? "+" : "") + data.mpu.roll.toFixed(1);
-          
-          const clampedPitch = Math.max(-90, Math.min(90, data.mpu.pitch));
-          const gaugePct = ((clampedPitch + 90) / 180) * 100;
-          document.getElementById('pitch-gauge').style.width = gaugePct + "%";
-
-          document.getElementById('mpu-temp-c').innerText = data.mpu.temp_c.toFixed(1);
-          document.getElementById('mpu-temp-f').innerText = data.mpu.temp_f.toFixed(1);
-
-          document.getElementById('mpu-ax-ms').innerText = (data.mpu.ax >= 0 ? "+" : "") + data.mpu.ax.toFixed(3);
-          document.getElementById('mpu-ay-ms').innerText = (data.mpu.ay >= 0 ? "+" : "") + data.mpu.ay.toFixed(3);
-          document.getElementById('mpu-az-ms').innerText = (data.mpu.az >= 0 ? "+" : "") + data.mpu.az.toFixed(3);
-
-          document.getElementById('mpu-ax-g').innerText = (data.mpu.ax_g >= 0 ? "+" : "") + data.mpu.ax_g.toFixed(3);
-          document.getElementById('mpu-ay-g').innerText = (data.mpu.ay_g >= 0 ? "+" : "") + data.mpu.ay_g.toFixed(3);
-          document.getElementById('mpu-az-g').innerText = (data.mpu.az_g >= 0 ? "+" : "") + data.mpu.az_g.toFixed(3);
-
-          document.getElementById('mpu-gx-deg').innerText = (data.mpu.gx >= 0 ? "+" : "") + data.mpu.gx.toFixed(2);
-          document.getElementById('mpu-gy-deg').innerText = (data.mpu.gy >= 0 ? "+" : "") + data.mpu.gy.toFixed(2);
-          document.getElementById('mpu-gz-deg').innerText = (data.mpu.gz >= 0 ? "+" : "") + data.mpu.gz.toFixed(2);
-
-          document.getElementById('mpu-gx-rad').innerText = (data.mpu.gx_rad >= 0 ? "+" : "") + data.mpu.gx_rad.toFixed(3);
-          document.getElementById('mpu-gy-rad').innerText = (data.mpu.gy_rad >= 0 ? "+" : "") + data.mpu.gy_rad.toFixed(3);
-          document.getElementById('mpu-gz-rad').innerText = (data.mpu.gz_rad >= 0 ? "+" : "") + data.mpu.gz_rad.toFixed(3);
-        } else {
-          mpuBadge.className = "badge warn";
-          mpuBadge.innerText = "MPU6050: DISCONNECTED";
-          document.getElementById('mpu-updated-tag').innerText = "I2C ERROR";
-
-          document.getElementById('mpu-accel-total').innerText = "--";
-          document.getElementById('mpu-pitch').innerText = "--";
-          document.getElementById('mpu-roll').innerText = "--";
-          document.getElementById('mpu-temp-c').innerText = "--";
-          document.getElementById('mpu-temp-f').innerText = "--";
-
-          document.getElementById('mpu-ax-ms').innerText = "SENSOR DISCONNECTED";
-          document.getElementById('mpu-ay-ms').innerText = "CHECK SDA (21)";
-          document.getElementById('mpu-az-ms').innerText = "CHECK SCL (22)";
-        }
-
-        // 3. SERVER INGEST STATUS
-        const serverBadge = document.getElementById('server-badge');
-        if (data.server) {
-          document.getElementById('srv-url').innerText = data.server.url;
-          document.getElementById('srv-latency').innerText = data.server.last_latency_ms + ' ms';
-          document.getElementById('srv-ok').innerText = data.server.success_count;
-          document.getElementById('srv-fail').innerText = data.server.fail_count;
-          document.getElementById('srv-resp').innerText = data.server.last_response || '--';
-
-          if (data.server.last_code >= 200 && data.server.last_code < 300) {
-            serverBadge.className = "badge solid";
-            serverBadge.innerHTML = '<span class="pulse"></span> CLOUD: 200 OK';
-            document.getElementById('srv-status').innerHTML = '<span style="color:#FFF;">HTTP ' + data.server.last_code + ' OK</span>';
-            const agoSec = Math.round(data.server.last_send_ago_ms / 100) / 10;
-            document.getElementById('server-updated-tag').innerText = 'SYNCED ' + agoSec + 'S AGO';
-          } else if (data.server.last_code > 0) {
-            serverBadge.className = "badge warn";
-            serverBadge.innerText = 'CLOUD: HTTP ' + data.server.last_code;
-            document.getElementById('srv-status').innerText = 'HTTP ' + data.server.last_code;
-            document.getElementById('server-updated-tag').innerText = 'HTTP WARNING';
-          } else {
-            serverBadge.className = "badge outline";
-            serverBadge.innerText = 'CLOUD: STANDBY';
-            document.getElementById('srv-status').innerText = 'INITIALIZING...';
-            document.getElementById('server-updated-tag').innerText = 'STANDBY';
-          }
-        }
-
-      } catch (err) {
-        failedFetches++;
-        if (failedFetches > 2) {
-          document.getElementById('conn-badge').className = "badge warn";
-          document.getElementById('conn-badge').innerText = "OFFLINE [RETRYING...]";
-          document.getElementById('error-banner').className = "alert-box active";
-          document.getElementById('error-msg').innerText = "UNABLE TO REACH ESP32 TELEMETRY ENDPOINT (/api/data): " + err.message;
-        }
+      } catch (e) {
+        console.error('Fetch error:', e);
       }
     }
-
-    function formatUptime(totalSeconds) {
-      const hrs = Math.floor(totalSeconds / 3600).toString().padStart(2, '0');
-      const mins = Math.floor((totalSeconds % 3600) / 60).toString().padStart(2, '0');
-      const secs = Math.floor(totalSeconds % 60).toString().padStart(2, '0');
-      return hrs + ":" + mins + ":" + secs;
-    }
-
-    pollTelemetry();
-    setInterval(pollTelemetry, 1000);
+    setInterval(pollStatus, 2500);
+    pollStatus();
   </script>
 </body>
 </html>
 )rawliteral";
 
 /* ====================================================================
- * 5. EMBEDDED SHARP MONOCHROME WEB OTA HTML
- * ==================================================================== */
-const char OTA_INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ESP32 // FIRMWARE OTA</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; border-radius: 0 !important; }
-    body { background: #000000; color: #FFFFFF; font-family: ui-monospace, Menlo, Consolas, monospace; padding: 20px; line-height: 1.4; -webkit-font-smoothing: antialiased; }
-    .box { max-width: 520px; margin: 40px auto; border: 1px solid #FFFFFF; padding: 24px; background: #080808; }
-    h1 { font-size: 16px; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 8px; font-weight: 900; }
-    p { font-size: 11px; color: #888888; margin-bottom: 20px; letter-spacing: 1px; }
-    input[type=file] { display: block; width: 100%; border: 1px solid #333333; padding: 12px; background: #000000; color: #FFFFFF; font-size: 11px; margin-bottom: 16px; cursor: pointer; }
-    input[type=file]:hover { border-color: #FFFFFF; }
-    .btn { display: inline-block; width: 100%; padding: 12px; font-size: 12px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; color: #000000; background: #FFFFFF; border: 1px solid #FFFFFF; cursor: pointer; text-align: center; text-decoration: none; margin-bottom: 10px; }
-    .btn:hover { background: #000000; color: #FFFFFF; }
-    .btn.outline { background: #000000; color: #888888; border-color: #333333; }
-    .btn.outline:hover { color: #FFFFFF; border-color: #FFFFFF; }
-    .bar-wrap { border: 1px solid #333333; height: 16px; margin: 16px 0; display: none; background: #111111; }
-    .bar-fill { height: 100%; width: 0%; background: #FFFFFF; transition: width 0.1s linear; }
-    #status { font-size: 11px; letter-spacing: 1px; margin-top: 10px; text-transform: uppercase; font-weight: 700; color: #AAAAAA; }
-    .badge { display: inline-block; padding: 2px 6px; border: 1px solid #FFF; font-size: 9px; margin-bottom: 12px; }
-  </style>
-</head>
-<body>
-  <div class="box">
-    <span class="badge">[ ESP32 OVER-THE-AIR FIRMWARE UPDATE ]</span>
-    <h1>FIRMWARE FLASH PORTAL</h1>
-    <p>SELECT COMPILED .BIN FIRMWARE BINARY TO REFLASH OVER WI-FI</p>
-    
-    <form id="upload_form" enctype="multipart/form-data" method="POST" action="/update">
-      <input type="file" name="update" id="file" accept=".bin" required onchange="fileSelected()">
-      <div class="bar-wrap" id="bar_wrap"><div class="bar-fill" id="bar_fill"></div></div>
-      <button type="submit" id="btn_submit" class="btn">[ FLASH .BIN FIRMWARE ]</button>
-      <a href="/" class="btn outline">[ CANCEL &amp; RETURN TO DASHBOARD ]</a>
-      <div id="status">STATUS: STANDBY // WAITING FOR BINARY FILE</div>
-    </form>
-  </div>
-
-  <script>
-    function fileSelected() {
-      const f = document.getElementById('file').files[0];
-      if (f) document.getElementById('status').innerText = 'SELECTED: ' + f.name + ' (' + Math.round(f.size / 1024) + ' KB)';
-    }
-
-    document.getElementById('upload_form').onsubmit = function(e) {
-      e.preventDefault();
-      const f = document.getElementById('file').files[0];
-      if (!f) return;
-
-      const data = new FormData();
-      data.append('update', f);
-
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/update', true);
-
-      document.getElementById('bar_wrap').style.display = 'block';
-      document.getElementById('btn_submit').style.display = 'none';
-      document.getElementById('status').innerText = 'FLASHING FIRMWARE TO SPI FLASH... DO NOT POWER OFF';
-
-      xhr.upload.onprogress = function(e) {
-        if (e.lengthComputable) {
-          const pct = Math.round((e.loaded / e.total) * 100);
-          document.getElementById('bar_fill').style.width = pct + '%';
-          document.getElementById('status').innerText = 'UPLOADING: ' + pct + '%';
-        }
-      };
-
-      xhr.onload = function() {
-        if (xhr.status === 200) {
-          document.getElementById('bar_fill').style.width = '100%';
-          document.getElementById('status').innerText = 'FLASH COMPLETE! REBOOTING ESP32 NODE...';
-          setTimeout(() => { window.location.href = '/'; }, 6000);
-        } else {
-          document.getElementById('status').innerText = 'FLASH ERROR: ' + xhr.responseText;
-          document.getElementById('btn_submit').style.display = 'block';
-        }
-      };
-
-      xhr.onerror = function() {
-        document.getElementById('status').innerText = 'NETWORK / COMMS ERROR DURING FLASH';
-        document.getElementById('btn_submit').style.display = 'block';
-      };
-
-      xhr.send(data);
-    };
-  </script>
-</body>
-</html>
-)rawliteral";
-
-/* ====================================================================
- * 6. HARDWARE SENSOR DRIVERS
+ * 9. WEB SERVER HANDLERS & OTA
  * ==================================================================== */
 
-void initMPU6050() {
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  delay(100);
-
-  if (!mpu.begin(0x68, &Wire)) {
-    Serial.println("[MPU6050] Address 0x68 not found. Checking 0x69...");
-    if (!mpu.begin(0x69, &Wire)) {
-      Serial.println(
-          "[MPU6050] Sensor not found on I2C bus! Check SDA/SCL wiring.");
-      mpuConnected = false;
-      return;
-    }
-  }
-
-  mpuConnected = true;
-  Serial.println("[MPU6050] Sensor online and initialized.");
-  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+void handleRoot() {
+  server.send_P(200, "text/html", INDEX_HTML);
 }
 
-void readMPU6050() {
-  if (!mpuConnected) {
-    if (millis() % 5000 < 100) {
-      initMPU6050();
-    }
-    return;
-  }
-
-  sensors_event_t a, g, temp;
-  if (!mpu.getEvent(&a, &g, &temp)) {
-    mpuConnected = false;
-    return;
-  }
-
-  mpuData.ax = a.acceleration.x;
-  mpuData.ay = a.acceleration.y;
-  mpuData.az = a.acceleration.z;
-
-  mpuData.ax_g = mpuData.ax / 9.80665;
-  mpuData.ay_g = mpuData.ay / 9.80665;
-  mpuData.az_g = mpuData.az / 9.80665;
-  mpuData.total_accel_g =
-      sqrt((mpuData.ax_g * mpuData.ax_g) + (mpuData.ay_g * mpuData.ay_g) +
-           (mpuData.az_g * mpuData.az_g));
-
-  mpuData.gx_rad = g.gyro.x;
-  mpuData.gy_rad = g.gyro.y;
-  mpuData.gz_rad = g.gyro.z;
-  mpuData.gx = g.gyro.x * 57.2957795;
-  mpuData.gy = g.gyro.y * 57.2957795;
-  mpuData.gz = g.gyro.z * 57.2957795;
-
-  mpuData.temp_c = temp.temperature;
-  mpuData.temp_f = (temp.temperature * 1.8) + 32.0;
-
-  mpuData.pitch = atan2(-mpuData.ax, sqrt(mpuData.ay * mpuData.ay +
-                                          mpuData.az * mpuData.az)) *
-                  57.2957795;
-  mpuData.roll = atan2(mpuData.ay, mpuData.az) * 57.2957795;
-}
-
-/* ====================================================================
- * 6.5. HYDRA SERVER TELEMETRY INGEST DISPATCH (HTTP/HTTPS POST)
- * ==================================================================== */
-
-void sendTelemetryToServer() {
-  if (WiFi.status() != WL_CONNECTED) {
-    return;
-  }
-
-  // Drain GPS serial buffer before network request to prevent buffer overflow
-  while (gpsSerial.available() > 0) {
-    char c = gpsSerial.read();
-    gps.encode(c);
-    lastGpsByteMillis = millis();
-  }
-
-  // Hardware status evaluation
-  bool gpsHwAlive =
-      (lastGpsByteMillis > 0 && (millis() - lastGpsByteMillis < 2500));
-  bool hasFix = gps.location.isValid() && (gps.location.age() < 5000);
-  int sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
-
-  String hwStatus;
-  if (!gpsHwAlive) {
-    hwStatus = (gps.charsProcessed() == 0) ? "DEAD / NO DATA RECEIVED"
-                                           : "COMM TIMEOUT / STALLED";
-  } else {
-    hwStatus = "ALIVE & STREAMING";
-  }
-
-  String fixStage;
-  if (!gpsHwAlive) {
-    fixStage = "OFFLINE";
-  } else if (hasFix) {
-    fixStage = "3D FIX LOCKED (" + String(sats) + " SATS)";
-  } else if (sats == 0) {
-    fixStage = "SEARCHING SATELLITES";
-  } else if (sats < 4) {
-    fixStage = "ACQUIRING FIX";
-  } else {
-    fixStage = "3D FIX LOCKED";
-  }
-
-  // Build JSON Request Body matching a.md Section 2.C exactly
-  String payload = "{";
-  payload += "\"node_uid\":\"" + String(NODE_UID) + "\",";
-  payload += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-
-  // GPS Telemetry Object
-  payload += "\"gps\":{";
-  payload +=
-      "\"connected\":" + String(gps.charsProcessed() > 0 ? "true" : "false") +
-      ",";
-  payload += "\"hw_alive\":" + String(gpsHwAlive ? "true" : "false") + ",";
-  payload += "\"hw_status\":\"" + hwStatus + "\",";
-  payload += "\"fix\":" + String(hasFix ? "true" : "false") + ",";
-  payload += "\"fix_stage\":\"" + fixStage + "\",";
-  payload += "\"satellites\":" + String(sats) + ",";
-  payload += "\"lat\":" + String(hasFix ? gps.location.lat() : 0.0, 6) + ",";
-  payload += "\"lng\":" + String(hasFix ? gps.location.lng() : 0.0, 6) + ",";
-  payload += "\"alt_m\":" +
-             String(gps.altitude.isValid() ? gps.altitude.meters() : 0.0, 1) +
-             ",";
-  payload += "\"speed_kmh\":" +
-             String(gps.speed.isValid() ? gps.speed.kmph() : 0.0, 1) + ",";
-  payload += "\"course_deg\":" +
-             String(gps.course.isValid() ? gps.course.deg() : 0.0, 1) + ",";
-  payload +=
-      "\"cardinal\":\"" +
-      String(gps.course.isValid() ? TinyGPSPlus::cardinal(gps.course.deg())
-                                  : "N") +
-      "\"";
-  payload += "},";
-
-  // MPU-6050 Telemetry Object
-  payload += "\"mpu\":{";
-  payload += "\"connected\":" + String(mpuConnected ? "true" : "false") + ",";
-  payload += "\"pitch\":" + String(mpuConnected ? mpuData.pitch : 0.0, 2) + ",";
-  payload += "\"roll\":" + String(mpuConnected ? mpuData.roll : 0.0, 2) + ",";
-  payload += "\"total_accel_g\":" +
-             String(mpuConnected ? mpuData.total_accel_g : 0.0, 2) + ",";
-  payload += "\"ax\":" + String(mpuConnected ? mpuData.ax : 0.0, 3) + ",";
-  payload += "\"ay\":" + String(mpuConnected ? mpuData.ay : 0.0, 3) + ",";
-  payload += "\"az\":" + String(mpuConnected ? mpuData.az : 0.0, 3) + ",";
-  payload += "\"gx\":" + String(mpuConnected ? mpuData.gx : 0.0, 2) + ",";
-  payload += "\"gy\":" + String(mpuConnected ? mpuData.gy : 0.0, 2) + ",";
-  payload += "\"gz\":" + String(mpuConnected ? mpuData.gz : 0.0, 2) + "";
-  payload += "}";
-
-  payload += "}";
-
-  // HTTP / HTTPS POST Transmission
-  HTTPClient http;
-  http.setTimeout(3000);
-  unsigned long startT = millis();
-  bool isHttps = String(SERVER_API_URL).startsWith("https://");
-  int httpCode = 0;
-
-  if (isHttps) {
-    WiFiClientSecure secureClient;
-    secureClient
-        .setInsecure(); // Skip certificate verification for embedded TLS
-    secureClient.setTimeout(3000);
-    if (http.begin(secureClient, SERVER_API_URL)) {
-      http.addHeader("Content-Type", "application/json");
-      httpCode = http.POST(payload);
-      if (httpCode > 0) {
-        lastServerResponse = http.getString();
-      } else {
-        lastServerResponse = http.errorToString(httpCode);
-      }
-      http.end();
-    }
-  } else {
-    WiFiClient client;
-    client.setTimeout(3000);
-    if (http.begin(client, SERVER_API_URL)) {
-      http.addHeader("Content-Type", "application/json");
-      httpCode = http.POST(payload);
-      if (httpCode > 0) {
-        lastServerResponse = http.getString();
-      } else {
-        lastServerResponse = http.errorToString(httpCode);
-      }
-      http.end();
-    }
-  }
-
-  lastServerDurationMs = millis() - startT;
-  lastServerHttpCode = httpCode;
-
-  if (httpCode >= 200 && httpCode < 300) {
-    serverSuccessCount++;
-    Serial.printf("[SERVER] Telemetry Ingest SUCCESS (HTTP %d, %lums): %s\n",
-                  httpCode, lastServerDurationMs, lastServerResponse.c_str());
-  } else if (httpCode > 0) {
-    serverFailCount++;
-    Serial.printf("[SERVER] Telemetry Ingest WARN (HTTP %d, %lums): %s\n",
-                  httpCode, lastServerDurationMs, lastServerResponse.c_str());
-  } else {
-    serverFailCount++;
-    Serial.printf("[SERVER] Telemetry Ingest FAILED: %s (code %d, %lums)\n",
-                  http.errorToString(httpCode).c_str(), httpCode,
-                  lastServerDurationMs);
-  }
-
-  // Drain GPS serial buffer again after network request
-  while (gpsSerial.available() > 0) {
-    char c = gpsSerial.read();
-    gps.encode(c);
-    lastGpsByteMillis = millis();
-  }
-}
-
-/* ====================================================================
- * 7. WEB SERVER HANDLERS & OTA CONTROLLER
- * ==================================================================== */
-
-void handleRoot() { server.send_P(200, "text/html", INDEX_HTML); }
-
-void handleData() {
-  // Feed GPS characters to keep parser fresh
-  while (gpsSerial.available() > 0) {
-    char c = gpsSerial.read();
-    gps.encode(c);
-    lastGpsByteMillis = millis();
-  }
-
-  // 1. Hardware Communication & Alive Check
-  bool gpsHwAlive =
-      (lastGpsByteMillis > 0 && (millis() - lastGpsByteMillis < 2500));
-  bool hasFix = gps.location.isValid() && (gps.location.age() < 5000);
-  int sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
-
-  String hwStatus;
-  if (!gpsHwAlive) {
-    if (gps.charsProcessed() == 0) {
-      hwStatus = "DEAD / NO DATA RECEIVED";
-    } else {
-      hwStatus = "COMM TIMEOUT / STALLED";
-    }
-  } else {
-    hwStatus = "ALIVE & STREAMING";
-  }
-
-  // 2. Satellite Constellation Search & Lock Stage
-  String fixStage;
-  String statusDetail;
-  if (!gpsHwAlive) {
-    fixStage = "OFFLINE";
-    statusDetail = "GPS is NOT transmitting data to ESP32. Check 5V power and "
-                   "ensure GPS TX pin connects to ESP32 GPIO 16 (RX2).";
-  } else if (hasFix) {
-    fixStage = "3D FIX LOCKED (" + String(sats) + " SATS)";
-    statusDetail = "Active 3D satellite lock acquired. High-precision "
-                   "navigation coordinates valid.";
-  } else if (sats == 0) {
-    fixStage = "SEARCHING SATELLITES (0 SATS)";
-    statusDetail =
-        "Hardware is ALIVE and transmitting NMEA sentences. It is currently "
-        "searching the sky for satellite signals. Indoor walls block GPS "
-        "signals; move antenna near a window or outdoors.";
-  } else if (sats < 4) {
-    fixStage = "ACQUIRING FIX (" + String(sats) + "/4 SATS)";
-    statusDetail = "Detecting " + String(sats) +
-                   " satellite carrier signal(s). Minimum 4 satellites "
-                   "required for 3D coordinate lock.";
-  } else {
-    fixStage = "CALCULATING 3D FIX (" + String(sats) + " SATS)";
-    statusDetail = "Tracking " + String(sats) +
-                   " satellites. Synchronizing ephemeris & clock data...";
-  }
-
-  // Format UTC Date & Time
-  char dateBuf[16] = "----/--/--";
-  char timeBuf[16] = "--:--:--";
-  if (gps.date.isValid()) {
-    snprintf(dateBuf, sizeof(dateBuf), "%04d/%02d/%02d", gps.date.year(),
-             gps.date.month(), gps.date.day());
-  }
-  if (gps.time.isValid()) {
-    snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d:%02d", gps.time.hour(),
-             gps.time.minute(), gps.time.second());
-  }
-
+void handleStatus() {
   String json = "{";
-
-  // System
   json += "\"sys\":{";
-  json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+  json += "\"ip\":\"" + (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString()) + "\",";
   json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
   json += "\"uptime_sec\":" + String(millis() / 1000) + ",";
   json += "\"free_heap\":" + String(ESP.getFreeHeap());
   json += "},";
 
-  // GPS (Detailed Hardware & Constellation Status)
-  json += "\"gps\":{";
-  json += "\"hw_alive\":" + String(gpsHwAlive ? "true" : "false") + ",";
-  json += "\"hw_status\":\"" + hwStatus + "\",";
-  json += "\"fix_stage\":\"" + fixStage + "\",";
-  json += "\"status_detail\":\"" + statusDetail + "\",";
-  json +=
-      "\"last_rx_ms\":" +
-      String(lastGpsByteMillis > 0 ? (millis() - lastGpsByteMillis) : 999999) +
-      ",";
-  json +=
-      "\"connected\":" + String(gps.charsProcessed() > 0 ? "true" : "false") +
-      ",";
-  json += "\"fix\":" + String(hasFix ? "true" : "false") + ",";
-  json += "\"satellites\":" + String(sats) + ",";
-  json +=
-      "\"hdop\":" + String(gps.hdop.isValid() ? gps.hdop.hdop() : 0.0, 2) + ",";
-  json += "\"lat\":" + String(hasFix ? gps.location.lat() : 0.0, 6) + ",";
-  json += "\"lng\":" + String(hasFix ? gps.location.lng() : 0.0, 6) + ",";
-  json += "\"alt_m\":" +
-          String(gps.altitude.isValid() ? gps.altitude.meters() : 0.0, 1) + ",";
-  json += "\"alt_ft\":" +
-          String(gps.altitude.isValid() ? gps.altitude.feet() : 0.0, 1) + ",";
-  json += "\"speed_kmh\":" +
-          String(gps.speed.isValid() ? gps.speed.kmph() : 0.0, 1) + ",";
-  json += "\"speed_mph\":" +
-          String(gps.speed.isValid() ? gps.speed.mph() : 0.0, 1) + ",";
-  json += "\"course_deg\":" +
-          String(gps.course.isValid() ? gps.course.deg() : 0.0, 1) + ",";
-  json += "\"cardinal\":\"" +
-          String(gps.course.isValid() ? TinyGPSPlus::cardinal(gps.course.deg())
-                                      : "--") +
-          "\",";
-  json += "\"date\":\"" + String(dateBuf) + "\",";
-  json += "\"time\":\"" + String(timeBuf) + "\",";
-  json += "\"fix_age_ms\":" +
-          String(gps.location.isValid() ? gps.location.age() : 0) + ",";
-  json += "\"chars_rx\":" + String(gps.charsProcessed()) + ",";
-  json += "\"checksum_fail\":" + String(gps.failedChecksum());
+  json += "\"summary\":{";
+  json += "\"region\":\"" + liveSummary.region + "\",";
+  json += "\"status\":\"" + liveSummary.overallStatus + "\",";
+  json += "\"emergency\":" + String(liveSummary.isEmergency ? "true" : "false") + ",";
+  json += "\"latency_ms\":" + String(liveSummary.lastLatencyMs) + ",";
+  json += "\"http_code\":" + String(liveSummary.lastHttpCode) + ",";
+  json += "\"success_count\":" + String(liveSummary.fetchSuccessCount) + ",";
+  json += "\"fail_count\":" + String(liveSummary.fetchFailCount);
   json += "},";
 
-  // MPU-6050
-  json += "\"mpu\":{";
-  json += "\"connected\":" + String(mpuConnected ? "true" : "false") + ",";
-  if (mpuConnected) {
-    json += "\"ax\":" + String(mpuData.ax, 3) + ",";
-    json += "\"ay\":" + String(mpuData.ay, 3) + ",";
-    json += "\"az\":" + String(mpuData.az, 3) + ",";
-    json += "\"ax_g\":" + String(mpuData.ax_g, 3) + ",";
-    json += "\"ay_g\":" + String(mpuData.ay_g, 3) + ",";
-    json += "\"az_g\":" + String(mpuData.az_g, 3) + ",";
-    json += "\"total_accel_g\":" + String(mpuData.total_accel_g, 2) + ",";
-    json += "\"gx\":" + String(mpuData.gx, 2) + ",";
-    json += "\"gy\":" + String(mpuData.gy, 2) + ",";
-    json += "\"gz\":" + String(mpuData.gz, 2) + ",";
-    json += "\"gx_rad\":" + String(mpuData.gx_rad, 3) + ",";
-    json += "\"gy_rad\":" + String(mpuData.gy_rad, 3) + ",";
-    json += "\"gz_rad\":" + String(mpuData.gz_rad, 3) + ",";
-    json += "\"temp_c\":" + String(mpuData.temp_c, 1) + ",";
-    json += "\"temp_f\":" + String(mpuData.temp_f, 1) + ",";
-    json += "\"pitch\":" + String(mpuData.pitch, 1) + ",";
-    json += "\"roll\":" + String(mpuData.roll, 1);
-  } else {
-    json += "\"ax\":0,\"ay\":0,\"az\":0,\"ax_g\":0,\"ay_g\":0,\"az_g\":0,"
-            "\"total_accel_g\":0,";
-    json +=
-        "\"gx\":0,\"gy\":0,\"gz\":0,\"gx_rad\":0,\"gy_rad\":0,\"gz_rad\":0,";
-    json += "\"temp_c\":0,\"temp_f\":0,\"pitch\":0,\"roll\":0";
-  }
+  json += "\"flood\":{";
+  json += "\"status\":\"" + liveFlood.status + "\",";
+  json += "\"water_depth_cm\":" + String(liveFlood.waterDepthCm, 1) + ",";
+  json += "\"dist_cm\":" + String(liveFlood.distCm, 1) + ",";
+  json += "\"zone\":\"" + liveFlood.zone + "\",";
+  json += "\"hazard\":\"" + liveFlood.hazard + "\"";
   json += "},";
 
-  // Server Uplink Telemetry Status
-  json += "\"server\":{";
-  json += "\"url\":\"" + String(SERVER_API_URL) + "\",";
-  json += "\"last_code\":" + String(lastServerHttpCode) + ",";
-  json += "\"last_latency_ms\":" + String(lastServerDurationMs) + ",";
-  json += "\"success_count\":" + String(serverSuccessCount) + ",";
-  json += "\"fail_count\":" + String(serverFailCount) + ",";
-  json += "\"last_send_ago_ms\":" +
-          String(lastServerSendMillis > 0 ? (millis() - lastServerSendMillis)
-                                          : 999999) +
-          ",";
-  String cleanResp = lastServerResponse;
-  cleanResp.replace("\"", "'");
-  cleanResp.replace("\n", " ");
-  cleanResp.replace("\r", " ");
-  json += "\"last_response\":\"" + cleanResp + "\"";
+  json += "\"fire\":{";
+  json += "\"status\":\"" + liveFire.status + "\",";
+  json += "\"temp_c\":" + String(liveFire.tempC, 1) + ",";
+  json += "\"humidity\":" + String(liveFire.humidity, 1) + ",";
+  json += "\"gas_ppm\":" + String(liveFire.gasPpm, 1) + ",";
+  json += "\"air_quality\":\"" + liveFire.airQuality + "\",";
+  json += "\"hazard\":\"" + liveFire.hazard + "\"";
+  json += "},";
+
+  json += "\"landslide\":{";
+  json += "\"status\":\"" + liveLandslide.status + "\",";
+  json += "\"accel_g\":" + String(liveLandslide.accelG, 2) + ",";
+  json += "\"pitch\":" + String(liveLandslide.pitch, 1) + ",";
+  json += "\"roll\":" + String(liveLandslide.roll, 1) + ",";
+  json += "\"satellites\":" + String(liveLandslide.satellites) + ",";
+  json += "\"gps_fix\":" + String(liveLandslide.gpsFix ? "true" : "false") + ",";
+  json += "\"lat\":" + String(liveLandslide.lat, 4) + ",";
+  json += "\"lng\":" + String(liveLandslide.lng, 4) + ",";
+  json += "\"alt_m\":" + String(liveLandslide.altM, 1) + ",";
+  json += "\"hazard\":\"" + liveLandslide.hazard + "\"";
   json += "}";
 
   json += "}";
-
   server.send(200, "application/json", json);
 }
+
+void handleDisplayUpdate() {
+  if (server.hasArg("title")) currentTitle = server.arg("title");
+  if (server.hasArg("msg"))   currentMessage = server.arg("msg");
+  if (server.hasArg("mode"))  currentMode = server.arg("mode");
+  if (server.hasArg("theme")) applyTheme(server.arg("theme"));
+  if (server.hasArg("font"))  currentFontSize = server.arg("font").toInt();
+  if (server.hasArg("rot")) {
+    uint8_t newRot = server.arg("rot").toInt();
+    if (newRot != currentRotation) setRotation(newRot);
+  }
+
+  Serial.println("[TFT] Updating display from Web request...");
+  renderDisplay();
+  server.send(200, "application/json", "{\"status\":\"OK\"}");
+}
+
+// Embedded Web OTA HTML
+const char OTA_INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><title>ESP32 // OTA UPDATE</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; border-radius: 0 !important; }
+    body { background: #000; color: #FFF; font-family: ui-monospace, Menlo, monospace; padding: 24px; }
+    .box { max-width: 480px; margin: 40px auto; border: 1px solid #FFF; padding: 24px; background: #080808; }
+    h1 { font-size: 16px; margin-bottom: 12px; }
+    input[type=file] { width: 100%; border: 1px solid #444; padding: 10px; background: #000; color: #FFF; margin-bottom: 16px; }
+    .btn { display: block; width: 100%; padding: 12px; background: #FFF; color: #000; font-weight: 800; border: none; cursor: pointer; text-align: center; text-decoration: none; }
+    .btn:hover { background: #000; color: #FFF; outline: 1px solid #FFF; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>FIRMWARE FLASH PORTAL (ESP32)</h1>
+    <form id="upload_form" enctype="multipart/form-data" method="POST" action="/update">
+      <input type="file" name="update" accept=".bin" required>
+      <button type="submit" class="btn">[ FLASH .BIN FIRMWARE ]</button>
+    </form>
+  </div>
+</body>
+</html>
+)rawliteral";
 
 void setupWebOTA() {
   server.on("/update", HTTP_GET, []() {
@@ -1081,85 +1149,31 @@ void setupWebOTA() {
     server.send_P(200, "text/html", OTA_INDEX_HTML);
   });
 
-  server.on(
-      "/update", HTTP_POST,
-      []() {
-        if (strlen(otaUsername) > 0 && strlen(otaPassword) > 0) {
-          if (!server.authenticate(otaUsername, otaPassword)) {
-            return server.requestAuthentication();
-          }
-        }
-        server.sendHeader("Connection", "close");
-        server.send(200, "text/plain",
-                    (Update.hasError()) ? "OTA_FAIL" : "OTA_OK");
-        delay(1000);
-        ESP.restart();
-      },
-      []() {
-        HTTPUpload &upload = server.upload();
-        if (upload.status == UPLOAD_FILE_START) {
-          Serial.printf("[WebOTA] Update file received: %s\n",
-                        upload.filename.c_str());
-          if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-            Update.printError(Serial);
-          }
-        } else if (upload.status == UPLOAD_FILE_WRITE) {
-          if (Update.write(upload.buf, upload.currentSize) !=
-              upload.currentSize) {
-            Update.printError(Serial);
-          }
-        } else if (upload.status == UPLOAD_FILE_END) {
-          if (Update.end(true)) {
-            Serial.printf("[WebOTA] Success! %u bytes written. Rebooting...\n",
-                          upload.totalSize);
-          } else {
-            Update.printError(Serial);
-          }
-        }
-      });
-}
-
-void setupArduinoOTA() {
-  ArduinoOTA.setHostname(MDNS_HOSTNAME);
-  if (strlen(otaPassword) > 0) {
-    ArduinoOTA.setPassword(otaPassword);
-  }
-
-  ArduinoOTA.onStart([]() {
-    String type =
-        (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
-    Serial.println("[ArduinoOTA] Network flash initiated: " + type);
+  server.on("/update", HTTP_POST, []() {
+    if (strlen(otaUsername) > 0 && strlen(otaPassword) > 0) {
+      if (!server.authenticate(otaUsername, otaPassword)) {
+        return server.requestAuthentication();
+      }
+    }
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/plain", (Update.hasError()) ? "OTA_FAIL" : "OTA_OK");
+    delay(1000);
+    ESP.restart();
+  }, []() {
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) Update.printError(Serial);
+    } else if (upload.status == UPLOAD_FILE_END) {
+      if (Update.end(true)) Serial.println("[WebOTA] Flash complete. Rebooting...");
+      else Update.printError(Serial);
+    }
   });
-  ArduinoOTA.onEnd(
-      []() { Serial.println("\n[ArduinoOTA] Flash complete. Rebooting..."); });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("[ArduinoOTA] Progress: %u%%\r", (progress / (total / 100)));
-  });
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("[ArduinoOTA] Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR)
-      Serial.println("Auth Failed");
-    else if (error == OTA_BEGIN_ERROR)
-      Serial.println("Begin Failed");
-    else if (error == OTA_CONNECT_ERROR)
-      Serial.println("Connect Failed");
-    else if (error == OTA_RECEIVE_ERROR)
-      Serial.println("Receive Failed");
-    else if (error == OTA_END_ERROR)
-      Serial.println("End Failed");
-  });
-
-  ArduinoOTA.begin();
-  Serial.println("[ArduinoOTA] Network background listener ready.");
-}
-
-void handleNotFound() {
-  server.send(404, "text/plain",
-              "404: Route Not Found on ESP32 Telemetry Server");
 }
 
 /* ====================================================================
- * 8. SETUP & LOOP
+ * 10. SETUP & MAIN LOOP
  * ==================================================================== */
 
 void setup() {
@@ -1167,51 +1181,45 @@ void setup() {
   delay(500);
 
   Serial.println("\n==============================================");
-  Serial.println("  ESP32 TELEMETRY SERVER (GPS + MPU-6050 + OTA)");
+  Serial.println("  HYDRA LEVEL 2 PEOC KIOSK // 3.5\" ILI9488   ");
   Serial.println("==============================================");
 
-  // Initialize Hardware Serial 2 for NEO-6M GPS (RX: 16, TX: 17)
-  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
-  Serial.printf(
-      "[GPS] Hardware Serial 2 started at %d baud (RX: GPIO%d, TX: GPIO%d)\n",
-      GPS_BAUD, GPS_RX_PIN, GPS_TX_PIN);
+  // 1. Initialize ILI9488 8-bit parallel display
+  tftInit();
+  applyTheme("CYAN");
 
-  // Initialize I2C and MPU-6050 IMU
-  initMPU6050();
+  // 2. HYDRA Animated Boot Up Screen
+  renderBootScreen(15, "INITIALIZING 8-BIT PARALLEL TFT BUS... [OK]");
+  delay(600);
 
-  // Initialize Onboard LED (blinks while connecting, glows solid once
-  // connected)
-  pinMode(ONBOARD_LED_PIN, OUTPUT);
-  digitalWrite(ONBOARD_LED_PIN, LOW);
+  renderBootScreen(35, "STARTING ARDUINO NANO ESP32 SUBSYSTEMS... [OK]");
+  delay(400);
 
-  // Connect to Wi-Fi
+  renderBootScreen(55, "CONNECTING TO WI-FI: 'sakshyam'...");
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.printf("[WIFI] Connecting to '%s'", WIFI_SSID);
 
   unsigned long startAttemptTime = millis();
-  bool blinkState = false;
+  int wifiProgress = 55;
   while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
     delay(500);
-    blinkState = !blinkState;
-    digitalWrite(ONBOARD_LED_PIN, blinkState ? HIGH : LOW);
+    wifiProgress = min(80, wifiProgress + 3);
+    renderBootScreen(wifiProgress, "CONNECTING TO WI-FI ROUTER...");
     Serial.print(".");
   }
   Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
-    digitalWrite(ONBOARD_LED_PIN, HIGH); // Solid ON when Wi-Fi is connected
-    Serial.print("[WIFI] Connected! Assigned IP: ");
+    renderBootScreen(85, "WI-FI LINK ESTABLISHED! ASSIGNED IP.");
+    Serial.print("[WIFI] Connected! Display Web IP: ");
     Serial.println(WiFi.localIP());
+    delay(400);
   } else {
-    digitalWrite(ONBOARD_LED_PIN, LOW);
-    Serial.println("[WIFI] Connection timed out. Starting SoftAP Fallback...");
+    renderBootScreen(85, "ROUTER TIMEOUT. LAUNCHING ACCESS POINT...");
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASSWORD);
-    Serial.printf("[WIFI] SoftAP active! SSID: '%s' | Password: '%s'\n",
-                  AP_SSID, AP_PASSWORD);
-    Serial.print("[WIFI] Access at: http://");
-    Serial.println(WiFi.softAPIP());
+    delay(400);
   }
 
   // Setup mDNS
@@ -1220,54 +1228,64 @@ void setup() {
     MDNS.addService("http", "tcp", 80);
   }
 
-  // Setup Web Server Routes & OTA Services
+  // Setup Web Server Routes
   server.on("/", HTTP_GET, handleRoot);
-  server.on("/api/data", HTTP_GET, handleData);
-  server.on("/api/send_now", HTTP_GET, []() {
-    sendTelemetryToServer();
-    server.send(200, "application/json",
-                "{\"status\":\"TRIGGERED\",\"http_code\":" +
-                    String(lastServerHttpCode) + "}");
+  server.on("/api/status", HTTP_GET, handleStatus);
+  server.on("/api/display", HTTP_GET, handleDisplayUpdate);
+  server.on("/api/refresh", HTTP_GET, []() {
+    fetchTelemetryFeed();
+    renderDisplay();
+    server.send(200, "application/json", "{\"status\":\"REFRESHED\"}");
   });
   setupWebOTA();
-  server.onNotFound(handleNotFound);
   server.begin();
-  Serial.println("[HTTP] Web server started on port 80.");
+  Serial.println("[HTTP] Web server listening on port 80.");
 
-  // Setup ArduinoOTA for PlatformIO Network Flashing
-  setupArduinoOTA();
+  // Fetch initial telemetry from HYDRA server
+  if (WiFi.status() == WL_CONNECTED) {
+    renderBootScreen(95, "FETCHING LIVE TELEMETRY FEED FROM SERVER...");
+    fetchTelemetryFeed();
+    delay(500);
+  }
+
+  renderBootScreen(100, "BOOT COMPLETE. LAUNCHING HYDRA DISASTER COMMAND...");
+  delay(1000);
+
+  // Transition to data / alert screen
+  bool isAlert = liveSummary.isEmergency || 
+                 (liveFlood.hazard == "CRITICAL" || liveFlood.hazard == "HIGH") ||
+                 (liveLandslide.hazard == "CRITICAL" || liveLandslide.hazard == "HIGH") ||
+                 (liveFire.hazard == "CRITICAL" || liveFire.hazard == "HIGH");
+  currentScreenState = isAlert ? STATE_ALERT : STATE_NORMAL;
+  fillScreen(COLOR_BG);
+
+  renderDisplay();
 }
 
 void loop() {
   server.handleClient();
   ArduinoOTA.handle();
 
-  // Onboard LED Status Indicator: Glows SOLID when Wi-Fi is connected
-  if (WiFi.status() == WL_CONNECTED) {
-    digitalWrite(ONBOARD_LED_PIN, HIGH); // Solid ON when Wi-Fi is connected
-  } else {
-    digitalWrite(ONBOARD_LED_PIN, (millis() % 1000 < 150)
-                                      ? HIGH
-                                      : LOW); // Short pulse if disconnected
-  }
-
-  // Feed GPS parser from Hardware Serial 2 & track arrival time
-  while (gpsSerial.available() > 0) {
-    char c = gpsSerial.read();
-    gps.encode(c);
-    lastGpsByteMillis = millis();
-  }
-
-  // Read MPU-6050 at 10 Hz
+  // Periodic Telemetry Ingest & TFT Dashboard Refresh
   unsigned long now = millis();
-  if (now - lastSensorReadTime >= SENSOR_INTERVAL_MS) {
-    lastSensorReadTime = now;
-    readMPU6050();
-  }
+  if (now - lastServerPollTime >= SERVER_POLL_INTERVAL_MS) {
+    lastServerPollTime = now;
+    if (WiFi.status() == WL_CONNECTED) {
+      fetchTelemetryFeed();
+    }
 
-  // Periodic Telemetry Transmission to HYDRA Server API (every 2.0s per a.md)
-  if (now - lastServerSendMillis >= TELEMETRY_SEND_INTERVAL_MS) {
-    lastServerSendMillis = now;
-    sendTelemetryToServer();
+    bool isAlert = liveSummary.isEmergency || 
+                   (liveFlood.hazard == "CRITICAL" || liveFlood.hazard == "HIGH") ||
+                   (liveLandslide.hazard == "CRITICAL" || liveLandslide.hazard == "HIGH") ||
+                   (liveFire.hazard == "CRITICAL" || liveFire.hazard == "HIGH");
+
+    DisplayState targetState = isAlert ? STATE_ALERT : STATE_NORMAL;
+
+    if (targetState != currentScreenState) {
+      currentScreenState = targetState;
+      fillScreen(COLOR_BG); // Clean transition between Normal & Alert
+    }
+
+    renderDisplay();
   }
 }
