@@ -1162,10 +1162,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
             <td>High-Intensity Red Warning LED</td>
           </tr>
           <tr>
-            <td><strong>Audible Siren / Buzzer</strong></td>
+            <td><strong>5V Relay Module (Siren / Alarm)</strong></td>
             <td><code>GPIO 14</code></td>
             <td><code>GPIO 6</code></td>
-            <td>Active-LOW Buzzer (+ to 3.3V, - to GPIO 14)</td>
+            <td>5V Relay Module (VCC &rarr; 5V, GND &rarr; GND, IN &rarr; GPIO 14)</td>
           </tr>
         </tbody>
       </table>
