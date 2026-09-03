@@ -39,7 +39,7 @@ const char *SERVER_API_URL =
 
 const char *NODE_UID = "NODE-LANDSLIDE-01";
 const unsigned long TELEMETRY_SEND_INTERVAL_MS =
-    500; // Cadence: every 2.0s (1 to 2s per a.md)
+    500; // Cadence: every 0.5s (500 ms ping interval)
 
 // Fallback Access Point (AP) if router is out of range
 const char *AP_SSID = "ESP32-TELEMETRY";
@@ -576,7 +576,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
     }
 
     pollTelemetry();
-    setInterval(pollTelemetry, 1000);
+    setInterval(pollTelemetry, 500);
   </script>
 </body>
 </html>
@@ -1265,7 +1265,7 @@ void loop() {
     readMPU6050();
   }
 
-  // Periodic Telemetry Transmission to HYDRA Server API (every 2.0s per a.md)
+  // Periodic Telemetry Transmission to HYDRA Server API (every 0.5s)
   if (now - lastServerSendMillis >= TELEMETRY_SEND_INTERVAL_MS) {
     lastServerSendMillis = now;
     sendTelemetryToServer();

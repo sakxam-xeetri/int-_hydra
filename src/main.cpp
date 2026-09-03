@@ -18,25 +18,52 @@
 #include <ArduinoJson.h>
 
 /* ====================================================================
- * 1. ILI9488 8-BIT PARALLEL PINS (EXACTLY MATCHING example.ino)
+ * 1. ILI9488 8-BIT PARALLEL PINS (ARDUINO NANO ESP32 / ESP32-S3)
+ * ====================================================================
+ * CRITICAL HARDWARE NOTE FOR ARDUINO NANO ESP32:
+ * On ESP32-S3 (Nano ESP32), GPIO 19 is USB D- and GPIO 20 is USB D+.
+ * NEVER assign TFT control or data pins to GPIO 19 or 20!
+ * Doing so immediately shorts the USB data line, causing the board to
+ * disconnect and reconnect in an infinite boot-loop on Windows.
+ *
+ * Safe Nano ESP32 Header Wiring:
+ *   - LCD_RD  -> Nano Pin A0 (Hardware GPIO 1)
+ *   - LCD_WR  -> Nano Pin A1 (Hardware GPIO 2)
+ *   - LCD_RS  -> Nano Pin A2 (Hardware GPIO 3)  [Command / Data]
+ *   - LCD_CS  -> Nano Pin A3 (Hardware GPIO 4)  [Chip Select]
+ *   - LCD_RST -> Nano Pin A4 (Hardware GPIO 11) [Reset]
+ *
+ * 8-Bit Data Bus:
+ *   - LCD_D0  -> Nano Pin D2 (Hardware GPIO 5)
+ *   - LCD_D1  -> Nano Pin D3 (Hardware GPIO 6)
+ *   - LCD_D2  -> Nano Pin D4 (Hardware GPIO 7)
+ *   - LCD_D3  -> Nano Pin D5 (Hardware GPIO 8)
+ *   - LCD_D4  -> Nano Pin D6 (Hardware GPIO 9)
+ *   - LCD_D5  -> Nano Pin D7 (Hardware GPIO 10)
+ *   - LCD_D6  -> Nano Pin D8 (Hardware GPIO 17)
+ *   - LCD_D7  -> Nano Pin D9 (Hardware GPIO 18)
+ *
+ * Power:
+ *   - VCC     -> 5V or 3.3V
+ *   - GND     -> GND
  * ==================================================================== */
 
-// Control Pins
-#define TFT_RST 18  // Hardware Reset
-#define TFT_CS  19  // Chip Select (Active LOW)
-#define TFT_RS  21  // Register Select / DC (0 = Command, 1 = Data)
-#define TFT_WR  22  // Write Strobe (Active LOW)
-#define TFT_RD  23  // Read Strobe (Active LOW)
+// Control Pins (mapped to safe ESP32-S3 GPIOs for Nano ESP32)
+#define TFT_RD   1   // Silk Screen: A0
+#define TFT_WR   2   // Silk Screen: A1
+#define TFT_RS   3   // Silk Screen: A2 (Data/Command)
+#define TFT_CS   4   // Silk Screen: A3 (Chip Select)
+#define TFT_RST  11  // Silk Screen: A4 (Reset)
 
 // 8-Bit Data Bus Pins (D0 to D7)
-#define TFT_D0  33
-#define TFT_D1  32
-#define TFT_D2  13
-#define TFT_D3  12
-#define TFT_D4  14
-#define TFT_D5  27
-#define TFT_D6  26
-#define TFT_D7  25
+#define TFT_D0   5   // Silk Screen: D2
+#define TFT_D1   6   // Silk Screen: D3
+#define TFT_D2   7   // Silk Screen: D4
+#define TFT_D3   8   // Silk Screen: D5
+#define TFT_D4   9   // Silk Screen: D6
+#define TFT_D5   10  // Silk Screen: D7
+#define TFT_D6   17  // Silk Screen: D8
+#define TFT_D7   18  // Silk Screen: D9
 
 const uint8_t dataPins[8] = { TFT_D0, TFT_D1, TFT_D2, TFT_D3,
                              TFT_D4, TFT_D5, TFT_D6, TFT_D7 };
