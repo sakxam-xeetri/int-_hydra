@@ -12,12 +12,22 @@
 #include <ESPmDNS.h>
 #include <Update.h>
 #include <ArduinoOTA.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 
 /* ====================================================================
- * 1. WI-FI & OTA CONFIGURATION
+ * 1. WI-FI, SERVER & OTA CONFIGURATION
  * ==================================================================== */
 const char* WIFI_SSID     = "sakshyam";
 const char* WIFI_PASSWORD = "sakshyam";
+
+// HYDRA Production Ingest Endpoint for Flood Node (Node 01) per a.md Section 1 & 2.A
+const char* SERVER_API_URL  = "https://zenithkandel.com.np/hydra/backend/api/telemetry/flood.php";
+// Local Development / Raspberry Pi Fallback (uncomment to use local server)
+// const char* SERVER_API_URL = "http://192.168.1.100/codes/hydra/backend/api/telemetry/flood.php";
+
+const char* NODE_UID        = "NODE-FLOOD-01";
+const unsigned long TELEMETRY_SEND_INTERVAL_MS = 2000; // Cadence: every 2.0s (1 to 3s per a.md)
 
 // Fallback Access Point (AP) if router is out of range
 const char* AP_SSID       = "ESP32S3-DISTANCE";
@@ -61,6 +71,14 @@ String proximityZone = "OUT OF RANGE";
 
 unsigned long lastMeasureTime = 0;
 const unsigned long MEASURE_INTERVAL_MS = 60; // Measure distance at ~16 Hz for responsive radar
+
+// Server Telemetry Uplink State
+unsigned long lastServerSendMillis = 0;
+int lastServerHttpCode = 0;
+unsigned long lastServerDurationMs = 0;
+unsigned long serverSuccessCount = 0;
+unsigned long serverFailCount = 0;
+String lastServerResponse = "WAITING FOR FIRST UPLINK";
 
 /* ====================================================================
  * 4. EMBEDDED SHARP MONOCHROME WEB DASHBOARD HTML
@@ -373,6 +391,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       </div>
       <div class="badges">
         <span id="conn-badge" class="badge solid"><span class="pulse"></span> LIVE COMMS</span>
+        <span id="server-badge" class="badge outline">CLOUD: STANDBY</span>
         <span id="zone-badge" class="badge outline">RADAR: ACTIVE</span>
         <a href="/update" class="badge link">&#9889; WEB OTA</a>
       </div>
@@ -496,9 +515,40 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
       </table>
     </div>
 
-    <!-- SECTION 3: SYSTEM DIAGNOSTICS -->
+    <!-- SECTION 3: CLOUD SERVER TELEMETRY INGEST (a.md / Production API) -->
     <div class="section-title">
-      <span>03 // SYSTEM DIAGNOSTICS</span>
+      <span>03 // HYDRA CLOUD SERVER INGEST (FLOOD TELEMETRY)</span>
+      <span id="server-updated-tag" style="font-size: 10px; color: #888;">STANDBY</span>
+    </div>
+
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>TARGET API ENDPOINT</th>
+            <th>UPLINK STATUS</th>
+            <th>LATENCY</th>
+            <th>SUCCESS</th>
+            <th>FAIL</th>
+            <th>LAST SERVER RESPONSE</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td id="srv-url" style="color:#FFF; word-break:break-all;">https://zenithkandel.com.np/hydra/backend/api/telemetry/flood.php</td>
+            <td id="srv-status" class="num">CONNECTING...</td>
+            <td id="srv-latency" class="num">-- ms</td>
+            <td id="srv-ok" class="num">0</td>
+            <td id="srv-fail" class="num">0</td>
+            <td id="srv-resp" style="font-size:11px; color:#AAA; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">WAITING FOR FIRST UPLINK</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- SECTION 4: SYSTEM DIAGNOSTICS -->
+    <div class="section-title">
+      <span>04 // SYSTEM DIAGNOSTICS</span>
       <span>ESP32-S3 SUPER MINI</span>
     </div>
 
@@ -596,6 +646,34 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
         document.getElementById('sys-rssi').innerText = data.sys.rssi + " dBm";
         document.getElementById('sys-uptime').innerText = formatUptime(data.sys.uptime_sec);
         document.getElementById('sys-heap').innerText = Math.round(data.sys.free_heap / 1024) + " KB";
+
+        // 4. Server Ingest Status
+        const serverBadge = document.getElementById('server-badge');
+        if (data.server) {
+          document.getElementById('srv-url').innerText = data.server.url;
+          document.getElementById('srv-latency').innerText = data.server.last_latency_ms + " ms";
+          document.getElementById('srv-ok').innerText = data.server.success_count;
+          document.getElementById('srv-fail').innerText = data.server.fail_count;
+          document.getElementById('srv-resp').innerText = data.server.last_response || '--';
+
+          if (data.server.last_code >= 200 && data.server.last_code < 300) {
+            serverBadge.className = "badge solid";
+            serverBadge.innerHTML = '<span class="pulse"></span> CLOUD: 200 OK';
+            document.getElementById('srv-status').innerHTML = '<span style="color:#FFF;">HTTP ' + data.server.last_code + ' OK</span>';
+            const agoSec = Math.round(data.server.last_send_ago_ms / 100) / 10;
+            document.getElementById('server-updated-tag').innerText = 'SYNCED ' + agoSec + 'S AGO';
+          } else if (data.server.last_code > 0) {
+            serverBadge.className = "badge warn";
+            serverBadge.innerText = 'CLOUD: HTTP ' + data.server.last_code;
+            document.getElementById('srv-status').innerText = 'HTTP ' + data.server.last_code;
+            document.getElementById('server-updated-tag').innerText = 'HTTP WARNING';
+          } else {
+            serverBadge.className = "badge outline";
+            serverBadge.innerText = 'CLOUD: STANDBY';
+            document.getElementById('srv-status').innerText = 'INITIALIZING...';
+            document.getElementById('server-updated-tag').innerText = 'STANDBY';
+          }
+        }
 
       } catch (err) {
         failedFetches++;
@@ -767,18 +845,89 @@ void updateProximityLedBlink() {
     if (currentLedState) {
       currentLedState = false;
       digitalWrite(HIGH_DIST_LED, LOW);
-      digitalWrite(ONBOARD_LED, LOW);
     }
     return;
   }
 
-  // Non-blocking proportional blinking
+  // Non-blocking proportional blinking on external alert strobe
   unsigned long now = millis();
   if (now - lastBlinkToggleTime >= currentBlinkIntervalMs) {
     lastBlinkToggleTime = now;
     currentLedState = !currentLedState;
     digitalWrite(HIGH_DIST_LED, currentLedState ? HIGH : LOW);
-    digitalWrite(ONBOARD_LED, currentLedState ? HIGH : LOW);
+  }
+}
+
+/* ====================================================================
+ * 6.5. HYDRA SERVER TELEMETRY INGEST DISPATCH (HTTP/HTTPS POST)
+ * ==================================================================== */
+
+void sendTelemetryToServer() {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  // Build JSON payload matching a.md Section 2.A (Node 01 Flood Telemetry)
+  String payload = "{";
+  payload += "\"node_uid\":\"" + String(NODE_UID) + "\",";
+  payload += "\"dist_cm\":" + String(isSensorValid ? currentDistanceCm : 0.0, 1) + ",";
+  payload += "\"pulse_us\":" + String(pulseDurationUs) + ",";
+  payload += "\"rssi\":" + String(WiFi.RSSI()) + ",";
+  payload += "\"ip_address\":\"" + WiFi.localIP().toString() + "\",";
+  payload += "\"radar_zone\":\"" + proximityZone + "\",";
+  payload += "\"interval_ms\":" + String(isSensorValid ? currentBlinkIntervalMs : 0);
+  payload += "}";
+
+  HTTPClient http;
+  http.setTimeout(3000);
+  unsigned long startT = millis();
+  bool isHttps = String(SERVER_API_URL).startsWith("https://");
+  int httpCode = 0;
+
+  if (isHttps) {
+    WiFiClientSecure secureClient;
+    secureClient.setInsecure(); // Skip certificate verification for embedded TLS
+    secureClient.setTimeout(3000);
+    if (http.begin(secureClient, SERVER_API_URL)) {
+      http.addHeader("Content-Type", "application/json");
+      httpCode = http.POST(payload);
+      if (httpCode > 0) {
+        lastServerResponse = http.getString();
+      } else {
+        lastServerResponse = http.errorToString(httpCode);
+      }
+      http.end();
+    }
+  } else {
+    WiFiClient client;
+    client.setTimeout(3000);
+    if (http.begin(client, SERVER_API_URL)) {
+      http.addHeader("Content-Type", "application/json");
+      httpCode = http.POST(payload);
+      if (httpCode > 0) {
+        lastServerResponse = http.getString();
+      } else {
+        lastServerResponse = http.errorToString(httpCode);
+      }
+      http.end();
+    }
+  }
+
+  lastServerDurationMs = millis() - startT;
+  lastServerHttpCode = httpCode;
+
+  if (httpCode >= 200 && httpCode < 300) {
+    serverSuccessCount++;
+    Serial.printf("[SERVER] Flood Telemetry Ingest SUCCESS (HTTP %d, %lums): %s\n",
+                  httpCode, lastServerDurationMs, lastServerResponse.c_str());
+  } else if (httpCode > 0) {
+    serverFailCount++;
+    Serial.printf("[SERVER] Flood Telemetry Ingest WARN (HTTP %d, %lums): %s\n",
+                  httpCode, lastServerDurationMs, lastServerResponse.c_str());
+  } else {
+    serverFailCount++;
+    Serial.printf("[SERVER] Flood Telemetry Ingest FAILED: %s (code %d, %lums)\n",
+                  http.errorToString(httpCode).c_str(), httpCode, lastServerDurationMs);
   }
 }
 
@@ -829,6 +978,21 @@ void handleData() {
   json += "\"interval_ms\":" + String(isSensorValid ? currentBlinkIntervalMs : 0) + ",";
   json += "\"rate_desc\":\"" + rateDesc + "\",";
   json += "\"led_state\":" + String(currentLedState ? "true" : "false");
+  json += "},";
+
+  // Server Uplink Status
+  json += "\"server\":{";
+  json += "\"url\":\"" + String(SERVER_API_URL) + "\",";
+  json += "\"last_code\":" + String(lastServerHttpCode) + ",";
+  json += "\"last_latency_ms\":" + String(lastServerDurationMs) + ",";
+  json += "\"success_count\":" + String(serverSuccessCount) + ",";
+  json += "\"fail_count\":" + String(serverFailCount) + ",";
+  json += "\"last_send_ago_ms\":" + String(lastServerSendMillis > 0 ? (millis() - lastServerSendMillis) : 999999) + ",";
+  String cleanResp = lastServerResponse;
+  cleanResp.replace("\"", "'");
+  cleanResp.replace("\n", " ");
+  cleanResp.replace("\r", " ");
+  json += "\"last_response\":\"" + cleanResp + "\"";
   json += "}";
 
   json += "}";
@@ -937,16 +1101,21 @@ void setup() {
   Serial.printf("[WIFI] Connecting to '%s'", WIFI_SSID);
 
   unsigned long startAttemptTime = millis();
+  bool blinkState = false;
   while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
     delay(500);
+    blinkState = !blinkState;
+    digitalWrite(ONBOARD_LED, blinkState ? HIGH : LOW);
     Serial.print(".");
   }
   Serial.println();
 
   if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(ONBOARD_LED, HIGH); // Solid ON when Wi-Fi is connected
     Serial.print("[WIFI] Connected! Assigned IP: ");
     Serial.println(WiFi.localIP());
   } else {
+    digitalWrite(ONBOARD_LED, LOW);
     Serial.println("[WIFI] Router connection timed out. Starting SoftAP Fallback...");
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASSWORD);
@@ -964,6 +1133,10 @@ void setup() {
   // Setup HTTP Web Server Routes
   server.on("/", HTTP_GET, handleRoot);
   server.on("/api/data", HTTP_GET, handleData);
+  server.on("/api/send_now", HTTP_GET, []() {
+    sendTelemetryToServer();
+    server.send(200, "application/json", "{\"status\":\"TRIGGERED\",\"http_code\":" + String(lastServerHttpCode) + "}");
+  });
   setupWebOTA();
   server.onNotFound(handleNotFound);
   server.begin();
@@ -976,6 +1149,13 @@ void loop() {
   server.handleClient();
   ArduinoOTA.handle();
 
+  // Onboard LED Wi-Fi Status Indicator: Glows SOLID when Wi-Fi is connected
+  if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(ONBOARD_LED, HIGH); // Solid ON when Wi-Fi is connected
+  } else {
+    digitalWrite(ONBOARD_LED, (millis() % 1000 < 150) ? HIGH : LOW); // Short pulse if disconnected
+  }
+
   // Periodically read ultrasonic distance
   unsigned long now = millis();
   if (now - lastMeasureTime >= MEASURE_INTERVAL_MS) {
@@ -983,6 +1163,12 @@ void loop() {
     readUltrasonicSensor();
   }
 
-  // Continuously update LED blinking based on current distance
+  // Continuously update alert strobe LED blinking based on current distance
   updateProximityLedBlink();
+
+  // Periodic Telemetry Transmission to HYDRA Server API (every 2.0s per a.md)
+  if (now - lastServerSendMillis >= TELEMETRY_SEND_INTERVAL_MS) {
+    lastServerSendMillis = now;
+    sendTelemetryToServer();
+  }
 }
