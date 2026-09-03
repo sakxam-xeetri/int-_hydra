@@ -9,59 +9,62 @@
  *                   2) Network ArduinoOTA for IDE & PlatformIO
  * ==================================================================== */
 
-#include <Arduino.h>
-#include <WiFi.h>
-#include <WebServer.h>
-#include <ESPmDNS.h>
-#include <Update.h>
-#include <ArduinoOTA.h>
-#include <Wire.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
-#include <TinyGPSPlus.h>
+#include <Arduino.h>
+#include <ArduinoOTA.h>
+#include <ESPmDNS.h>
 #include <HTTPClient.h>
+#include <TinyGPSPlus.h>
+#include <Update.h>
+#include <WebServer.h>
+#include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <Wire.h>
 
 /* ====================================================================
  * 1. WI-FI, SERVER & OTA CONFIGURATION
  * ==================================================================== */
 // Local Wi-Fi router credentials
-const char* WIFI_SSID     = "sakshyam";
-const char* WIFI_PASSWORD = "sakshyam";
+const char *WIFI_SSID = "sakshyam";
+const char *WIFI_PASSWORD = "sakshyam";
 
 // HYDRA Server API Ingest Configuration (from a.md / Section 1 & 2.C)
 // Production Endpoint
-const char* SERVER_API_URL  = "https://zenithkandel.com.np/hydra/backend/api/telemetry/landslide.php";
+const char *SERVER_API_URL =
+    "https://zenithkandel.com.np/hydra/backend/api/telemetry/landslide.php";
 // Local Development / Raspberry Pi Fallback (uncomment to use local server)
-// const char* SERVER_API_URL = "http://192.168.1.100/codes/hydra/backend/api/telemetry/landslide.php";
+// const char* SERVER_API_URL =
+// "http://192.168.1.100/codes/hydra/backend/api/telemetry/landslide.php";
 
-const char* NODE_UID        = "NODE-LANDSLIDE-01";
-const unsigned long TELEMETRY_SEND_INTERVAL_MS = 2000; // Cadence: every 2.0s (1 to 2s per a.md)
+const char *NODE_UID = "NODE-LANDSLIDE-01";
+const unsigned long TELEMETRY_SEND_INTERVAL_MS =
+    500; // Cadence: every 2.0s (1 to 2s per a.md)
 
 // Fallback Access Point (AP) if router is out of range
-const char* AP_SSID       = "ESP32-TELEMETRY";
-const char* AP_PASSWORD   = "12345678"; // minimum 8 characters
+const char *AP_SSID = "ESP32-TELEMETRY";
+const char *AP_PASSWORD = "12345678"; // minimum 8 characters
 
 // mDNS Hostname (Access at http://esp32-telemetry.local)
-const char* MDNS_HOSTNAME = "esp32-telemetry";
+const char *MDNS_HOSTNAME = "esp32-telemetry";
 
 // OTA Security Credentials (used for both Web OTA /update and ArduinoOTA)
-const char* otaUsername   = "admin";
-const char* otaPassword   = "admin";
+const char *otaUsername = "admin";
+const char *otaPassword = "admin";
 
 /* ====================================================================
  * 2. HARDWARE PIN DEFINITIONS
  * ==================================================================== */
 // Onboard Status LED Indicator (GPIO 2 on ESP32 Dev Module / WROOM-32)
 #ifndef LED_BUILTIN
-  #define LED_BUILTIN 2
+#define LED_BUILTIN 2
 #endif
 #define ONBOARD_LED_PIN LED_BUILTIN
 
 // NEO-6M GPS Module connected to Hardware Serial 2
 #define GPS_RX_PIN 16 // ESP32 GPIO16 (RX2) -> Connect to GPS TX
 #define GPS_TX_PIN 17 // ESP32 GPIO17 (TX2) -> Connect to GPS RX
-#define GPS_BAUD   9600
+#define GPS_BAUD 9600
 
 // MPU-6050 IMU connected to Hardware I2C (Wire)
 #define I2C_SDA_PIN 21 // ESP32 GPIO21 -> Connect to MPU6050 SDA
@@ -89,15 +92,15 @@ unsigned long serverFailCount = 0;
 String lastServerResponse = "WAITING FOR FIRST UPLINK";
 
 struct MPUData {
-  float ax, ay, az;         // Acceleration in m/s^2
-  float ax_g, ay_g, az_g;   // Acceleration in g (1g = 9.80665 m/s^2)
-  float total_accel_g;      // Vector magnitude
-  float gx, gy, gz;         // Gyro in deg/s
+  float ax, ay, az;             // Acceleration in m/s^2
+  float ax_g, ay_g, az_g;       // Acceleration in g (1g = 9.80665 m/s^2)
+  float total_accel_g;          // Vector magnitude
+  float gx, gy, gz;             // Gyro in deg/s
   float gx_rad, gy_rad, gz_rad; // Gyro in rad/s
-  float temp_c;             // Temperature in °C
-  float temp_f;             // Temperature in °F
-  float pitch;              // Pitch angle (degrees)
-  float roll;               // Roll angle (degrees)
+  float temp_c;                 // Temperature in °C
+  float temp_f;                 // Temperature in °F
+  float pitch;                  // Pitch angle (degrees)
+  float roll;                   // Roll angle (degrees)
 } mpuData;
 
 /* ====================================================================
@@ -684,7 +687,8 @@ void initMPU6050() {
   if (!mpu.begin(0x68, &Wire)) {
     Serial.println("[MPU6050] Address 0x68 not found. Checking 0x69...");
     if (!mpu.begin(0x69, &Wire)) {
-      Serial.println("[MPU6050] Sensor not found on I2C bus! Check SDA/SCL wiring.");
+      Serial.println(
+          "[MPU6050] Sensor not found on I2C bus! Check SDA/SCL wiring.");
       mpuConnected = false;
       return;
     }
@@ -718,9 +722,9 @@ void readMPU6050() {
   mpuData.ax_g = mpuData.ax / 9.80665;
   mpuData.ay_g = mpuData.ay / 9.80665;
   mpuData.az_g = mpuData.az / 9.80665;
-  mpuData.total_accel_g = sqrt((mpuData.ax_g * mpuData.ax_g) + 
-                               (mpuData.ay_g * mpuData.ay_g) + 
-                               (mpuData.az_g * mpuData.az_g));
+  mpuData.total_accel_g =
+      sqrt((mpuData.ax_g * mpuData.ax_g) + (mpuData.ay_g * mpuData.ay_g) +
+           (mpuData.az_g * mpuData.az_g));
 
   mpuData.gx_rad = g.gyro.x;
   mpuData.gy_rad = g.gyro.y;
@@ -732,8 +736,10 @@ void readMPU6050() {
   mpuData.temp_c = temp.temperature;
   mpuData.temp_f = (temp.temperature * 1.8) + 32.0;
 
-  mpuData.pitch = atan2(-mpuData.ax, sqrt(mpuData.ay * mpuData.ay + mpuData.az * mpuData.az)) * 57.2957795;
-  mpuData.roll  = atan2(mpuData.ay, mpuData.az) * 57.2957795;
+  mpuData.pitch = atan2(-mpuData.ax, sqrt(mpuData.ay * mpuData.ay +
+                                          mpuData.az * mpuData.az)) *
+                  57.2957795;
+  mpuData.roll = atan2(mpuData.ay, mpuData.az) * 57.2957795;
 }
 
 /* ====================================================================
@@ -753,13 +759,15 @@ void sendTelemetryToServer() {
   }
 
   // Hardware status evaluation
-  bool gpsHwAlive = (lastGpsByteMillis > 0 && (millis() - lastGpsByteMillis < 2500));
+  bool gpsHwAlive =
+      (lastGpsByteMillis > 0 && (millis() - lastGpsByteMillis < 2500));
   bool hasFix = gps.location.isValid() && (gps.location.age() < 5000);
   int sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
 
   String hwStatus;
   if (!gpsHwAlive) {
-    hwStatus = (gps.charsProcessed() == 0) ? "DEAD / NO DATA RECEIVED" : "COMM TIMEOUT / STALLED";
+    hwStatus = (gps.charsProcessed() == 0) ? "DEAD / NO DATA RECEIVED"
+                                           : "COMM TIMEOUT / STALLED";
   } else {
     hwStatus = "ALIVE & STREAMING";
   }
@@ -784,7 +792,9 @@ void sendTelemetryToServer() {
 
   // GPS Telemetry Object
   payload += "\"gps\":{";
-  payload += "\"connected\":" + String(gps.charsProcessed() > 0 ? "true" : "false") + ",";
+  payload +=
+      "\"connected\":" + String(gps.charsProcessed() > 0 ? "true" : "false") +
+      ",";
   payload += "\"hw_alive\":" + String(gpsHwAlive ? "true" : "false") + ",";
   payload += "\"hw_status\":\"" + hwStatus + "\",";
   payload += "\"fix\":" + String(hasFix ? "true" : "false") + ",";
@@ -792,10 +802,18 @@ void sendTelemetryToServer() {
   payload += "\"satellites\":" + String(sats) + ",";
   payload += "\"lat\":" + String(hasFix ? gps.location.lat() : 0.0, 6) + ",";
   payload += "\"lng\":" + String(hasFix ? gps.location.lng() : 0.0, 6) + ",";
-  payload += "\"alt_m\":" + String(gps.altitude.isValid() ? gps.altitude.meters() : 0.0, 1) + ",";
-  payload += "\"speed_kmh\":" + String(gps.speed.isValid() ? gps.speed.kmph() : 0.0, 1) + ",";
-  payload += "\"course_deg\":" + String(gps.course.isValid() ? gps.course.deg() : 0.0, 1) + ",";
-  payload += "\"cardinal\":\"" + String(gps.course.isValid() ? TinyGPSPlus::cardinal(gps.course.deg()) : "N") + "\"";
+  payload += "\"alt_m\":" +
+             String(gps.altitude.isValid() ? gps.altitude.meters() : 0.0, 1) +
+             ",";
+  payload += "\"speed_kmh\":" +
+             String(gps.speed.isValid() ? gps.speed.kmph() : 0.0, 1) + ",";
+  payload += "\"course_deg\":" +
+             String(gps.course.isValid() ? gps.course.deg() : 0.0, 1) + ",";
+  payload +=
+      "\"cardinal\":\"" +
+      String(gps.course.isValid() ? TinyGPSPlus::cardinal(gps.course.deg())
+                                  : "N") +
+      "\"";
   payload += "},";
 
   // MPU-6050 Telemetry Object
@@ -803,7 +821,8 @@ void sendTelemetryToServer() {
   payload += "\"connected\":" + String(mpuConnected ? "true" : "false") + ",";
   payload += "\"pitch\":" + String(mpuConnected ? mpuData.pitch : 0.0, 2) + ",";
   payload += "\"roll\":" + String(mpuConnected ? mpuData.roll : 0.0, 2) + ",";
-  payload += "\"total_accel_g\":" + String(mpuConnected ? mpuData.total_accel_g : 0.0, 2) + ",";
+  payload += "\"total_accel_g\":" +
+             String(mpuConnected ? mpuData.total_accel_g : 0.0, 2) + ",";
   payload += "\"ax\":" + String(mpuConnected ? mpuData.ax : 0.0, 3) + ",";
   payload += "\"ay\":" + String(mpuConnected ? mpuData.ay : 0.0, 3) + ",";
   payload += "\"az\":" + String(mpuConnected ? mpuData.az : 0.0, 3) + ",";
@@ -823,7 +842,8 @@ void sendTelemetryToServer() {
 
   if (isHttps) {
     WiFiClientSecure secureClient;
-    secureClient.setInsecure(); // Skip certificate verification for embedded TLS
+    secureClient
+        .setInsecure(); // Skip certificate verification for embedded TLS
     secureClient.setTimeout(3000);
     if (http.begin(secureClient, SERVER_API_URL)) {
       http.addHeader("Content-Type", "application/json");
@@ -864,7 +884,8 @@ void sendTelemetryToServer() {
   } else {
     serverFailCount++;
     Serial.printf("[SERVER] Telemetry Ingest FAILED: %s (code %d, %lums)\n",
-                  http.errorToString(httpCode).c_str(), httpCode, lastServerDurationMs);
+                  http.errorToString(httpCode).c_str(), httpCode,
+                  lastServerDurationMs);
   }
 
   // Drain GPS serial buffer again after network request
@@ -879,9 +900,7 @@ void sendTelemetryToServer() {
  * 7. WEB SERVER HANDLERS & OTA CONTROLLER
  * ==================================================================== */
 
-void handleRoot() {
-  server.send_P(200, "text/html", INDEX_HTML);
-}
+void handleRoot() { server.send_P(200, "text/html", INDEX_HTML); }
 
 void handleData() {
   // Feed GPS characters to keep parser fresh
@@ -892,7 +911,8 @@ void handleData() {
   }
 
   // 1. Hardware Communication & Alive Check
-  bool gpsHwAlive = (lastGpsByteMillis > 0 && (millis() - lastGpsByteMillis < 2500));
+  bool gpsHwAlive =
+      (lastGpsByteMillis > 0 && (millis() - lastGpsByteMillis < 2500));
   bool hasFix = gps.location.isValid() && (gps.location.age() < 5000);
   int sats = gps.satellites.isValid() ? gps.satellites.value() : 0;
 
@@ -912,31 +932,39 @@ void handleData() {
   String statusDetail;
   if (!gpsHwAlive) {
     fixStage = "OFFLINE";
-    statusDetail = "GPS is NOT transmitting data to ESP32. Check 5V power and ensure GPS TX pin connects to ESP32 GPIO 16 (RX2).";
+    statusDetail = "GPS is NOT transmitting data to ESP32. Check 5V power and "
+                   "ensure GPS TX pin connects to ESP32 GPIO 16 (RX2).";
   } else if (hasFix) {
     fixStage = "3D FIX LOCKED (" + String(sats) + " SATS)";
-    statusDetail = "Active 3D satellite lock acquired. High-precision navigation coordinates valid.";
+    statusDetail = "Active 3D satellite lock acquired. High-precision "
+                   "navigation coordinates valid.";
   } else if (sats == 0) {
     fixStage = "SEARCHING SATELLITES (0 SATS)";
-    statusDetail = "Hardware is ALIVE and transmitting NMEA sentences. It is currently searching the sky for satellite signals. Indoor walls block GPS signals; move antenna near a window or outdoors.";
+    statusDetail =
+        "Hardware is ALIVE and transmitting NMEA sentences. It is currently "
+        "searching the sky for satellite signals. Indoor walls block GPS "
+        "signals; move antenna near a window or outdoors.";
   } else if (sats < 4) {
     fixStage = "ACQUIRING FIX (" + String(sats) + "/4 SATS)";
-    statusDetail = "Detecting " + String(sats) + " satellite carrier signal(s). Minimum 4 satellites required for 3D coordinate lock.";
+    statusDetail = "Detecting " + String(sats) +
+                   " satellite carrier signal(s). Minimum 4 satellites "
+                   "required for 3D coordinate lock.";
   } else {
     fixStage = "CALCULATING 3D FIX (" + String(sats) + " SATS)";
-    statusDetail = "Tracking " + String(sats) + " satellites. Synchronizing ephemeris & clock data...";
+    statusDetail = "Tracking " + String(sats) +
+                   " satellites. Synchronizing ephemeris & clock data...";
   }
 
   // Format UTC Date & Time
   char dateBuf[16] = "----/--/--";
   char timeBuf[16] = "--:--:--";
   if (gps.date.isValid()) {
-    snprintf(dateBuf, sizeof(dateBuf), "%04d/%02d/%02d", 
-             gps.date.year(), gps.date.month(), gps.date.day());
+    snprintf(dateBuf, sizeof(dateBuf), "%04d/%02d/%02d", gps.date.year(),
+             gps.date.month(), gps.date.day());
   }
   if (gps.time.isValid()) {
-    snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d:%02d", 
-             gps.time.hour(), gps.time.minute(), gps.time.second());
+    snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d:%02d", gps.time.hour(),
+             gps.time.minute(), gps.time.second());
   }
 
   String json = "{";
@@ -955,22 +983,37 @@ void handleData() {
   json += "\"hw_status\":\"" + hwStatus + "\",";
   json += "\"fix_stage\":\"" + fixStage + "\",";
   json += "\"status_detail\":\"" + statusDetail + "\",";
-  json += "\"last_rx_ms\":" + String(lastGpsByteMillis > 0 ? (millis() - lastGpsByteMillis) : 999999) + ",";
-  json += "\"connected\":" + String(gps.charsProcessed() > 0 ? "true" : "false") + ",";
+  json +=
+      "\"last_rx_ms\":" +
+      String(lastGpsByteMillis > 0 ? (millis() - lastGpsByteMillis) : 999999) +
+      ",";
+  json +=
+      "\"connected\":" + String(gps.charsProcessed() > 0 ? "true" : "false") +
+      ",";
   json += "\"fix\":" + String(hasFix ? "true" : "false") + ",";
   json += "\"satellites\":" + String(sats) + ",";
-  json += "\"hdop\":" + String(gps.hdop.isValid() ? gps.hdop.hdop() : 0.0, 2) + ",";
+  json +=
+      "\"hdop\":" + String(gps.hdop.isValid() ? gps.hdop.hdop() : 0.0, 2) + ",";
   json += "\"lat\":" + String(hasFix ? gps.location.lat() : 0.0, 6) + ",";
   json += "\"lng\":" + String(hasFix ? gps.location.lng() : 0.0, 6) + ",";
-  json += "\"alt_m\":" + String(gps.altitude.isValid() ? gps.altitude.meters() : 0.0, 1) + ",";
-  json += "\"alt_ft\":" + String(gps.altitude.isValid() ? gps.altitude.feet() : 0.0, 1) + ",";
-  json += "\"speed_kmh\":" + String(gps.speed.isValid() ? gps.speed.kmph() : 0.0, 1) + ",";
-  json += "\"speed_mph\":" + String(gps.speed.isValid() ? gps.speed.mph() : 0.0, 1) + ",";
-  json += "\"course_deg\":" + String(gps.course.isValid() ? gps.course.deg() : 0.0, 1) + ",";
-  json += "\"cardinal\":\"" + String(gps.course.isValid() ? TinyGPSPlus::cardinal(gps.course.deg()) : "--") + "\",";
+  json += "\"alt_m\":" +
+          String(gps.altitude.isValid() ? gps.altitude.meters() : 0.0, 1) + ",";
+  json += "\"alt_ft\":" +
+          String(gps.altitude.isValid() ? gps.altitude.feet() : 0.0, 1) + ",";
+  json += "\"speed_kmh\":" +
+          String(gps.speed.isValid() ? gps.speed.kmph() : 0.0, 1) + ",";
+  json += "\"speed_mph\":" +
+          String(gps.speed.isValid() ? gps.speed.mph() : 0.0, 1) + ",";
+  json += "\"course_deg\":" +
+          String(gps.course.isValid() ? gps.course.deg() : 0.0, 1) + ",";
+  json += "\"cardinal\":\"" +
+          String(gps.course.isValid() ? TinyGPSPlus::cardinal(gps.course.deg())
+                                      : "--") +
+          "\",";
   json += "\"date\":\"" + String(dateBuf) + "\",";
   json += "\"time\":\"" + String(timeBuf) + "\",";
-  json += "\"fix_age_ms\":" + String(gps.location.isValid() ? gps.location.age() : 0) + ",";
+  json += "\"fix_age_ms\":" +
+          String(gps.location.isValid() ? gps.location.age() : 0) + ",";
   json += "\"chars_rx\":" + String(gps.charsProcessed()) + ",";
   json += "\"checksum_fail\":" + String(gps.failedChecksum());
   json += "},";
@@ -997,8 +1040,10 @@ void handleData() {
     json += "\"pitch\":" + String(mpuData.pitch, 1) + ",";
     json += "\"roll\":" + String(mpuData.roll, 1);
   } else {
-    json += "\"ax\":0,\"ay\":0,\"az\":0,\"ax_g\":0,\"ay_g\":0,\"az_g\":0,\"total_accel_g\":0,";
-    json += "\"gx\":0,\"gy\":0,\"gz\":0,\"gx_rad\":0,\"gy_rad\":0,\"gz_rad\":0,";
+    json += "\"ax\":0,\"ay\":0,\"az\":0,\"ax_g\":0,\"ay_g\":0,\"az_g\":0,"
+            "\"total_accel_g\":0,";
+    json +=
+        "\"gx\":0,\"gy\":0,\"gz\":0,\"gx_rad\":0,\"gy_rad\":0,\"gz_rad\":0,";
     json += "\"temp_c\":0,\"temp_f\":0,\"pitch\":0,\"roll\":0";
   }
   json += "},";
@@ -1010,7 +1055,10 @@ void handleData() {
   json += "\"last_latency_ms\":" + String(lastServerDurationMs) + ",";
   json += "\"success_count\":" + String(serverSuccessCount) + ",";
   json += "\"fail_count\":" + String(serverFailCount) + ",";
-  json += "\"last_send_ago_ms\":" + String(lastServerSendMillis > 0 ? (millis() - lastServerSendMillis) : 999999) + ",";
+  json += "\"last_send_ago_ms\":" +
+          String(lastServerSendMillis > 0 ? (millis() - lastServerSendMillis)
+                                          : 999999) +
+          ",";
   String cleanResp = lastServerResponse;
   cleanResp.replace("\"", "'");
   cleanResp.replace("\n", " ");
@@ -1033,35 +1081,42 @@ void setupWebOTA() {
     server.send_P(200, "text/html", OTA_INDEX_HTML);
   });
 
-  server.on("/update", HTTP_POST, []() {
-    if (strlen(otaUsername) > 0 && strlen(otaPassword) > 0) {
-      if (!server.authenticate(otaUsername, otaPassword)) {
-        return server.requestAuthentication();
-      }
-    }
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/plain", (Update.hasError()) ? "OTA_FAIL" : "OTA_OK");
-    delay(1000);
-    ESP.restart();
-  }, []() {
-    HTTPUpload& upload = server.upload();
-    if (upload.status == UPLOAD_FILE_START) {
-      Serial.printf("[WebOTA] Update file received: %s\n", upload.filename.c_str());
-      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-        Update.printError(Serial);
-      }
-    } else if (upload.status == UPLOAD_FILE_WRITE) {
-      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-        Update.printError(Serial);
-      }
-    } else if (upload.status == UPLOAD_FILE_END) {
-      if (Update.end(true)) {
-        Serial.printf("[WebOTA] Success! %u bytes written. Rebooting...\n", upload.totalSize);
-      } else {
-        Update.printError(Serial);
-      }
-    }
-  });
+  server.on(
+      "/update", HTTP_POST,
+      []() {
+        if (strlen(otaUsername) > 0 && strlen(otaPassword) > 0) {
+          if (!server.authenticate(otaUsername, otaPassword)) {
+            return server.requestAuthentication();
+          }
+        }
+        server.sendHeader("Connection", "close");
+        server.send(200, "text/plain",
+                    (Update.hasError()) ? "OTA_FAIL" : "OTA_OK");
+        delay(1000);
+        ESP.restart();
+      },
+      []() {
+        HTTPUpload &upload = server.upload();
+        if (upload.status == UPLOAD_FILE_START) {
+          Serial.printf("[WebOTA] Update file received: %s\n",
+                        upload.filename.c_str());
+          if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+            Update.printError(Serial);
+          }
+        } else if (upload.status == UPLOAD_FILE_WRITE) {
+          if (Update.write(upload.buf, upload.currentSize) !=
+              upload.currentSize) {
+            Update.printError(Serial);
+          }
+        } else if (upload.status == UPLOAD_FILE_END) {
+          if (Update.end(true)) {
+            Serial.printf("[WebOTA] Success! %u bytes written. Rebooting...\n",
+                          upload.totalSize);
+          } else {
+            Update.printError(Serial);
+          }
+        }
+      });
 }
 
 void setupArduinoOTA() {
@@ -1071,22 +1126,27 @@ void setupArduinoOTA() {
   }
 
   ArduinoOTA.onStart([]() {
-    String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
+    String type =
+        (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
     Serial.println("[ArduinoOTA] Network flash initiated: " + type);
   });
-  ArduinoOTA.onEnd([]() {
-    Serial.println("\n[ArduinoOTA] Flash complete. Rebooting...");
-  });
+  ArduinoOTA.onEnd(
+      []() { Serial.println("\n[ArduinoOTA] Flash complete. Rebooting..."); });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
     Serial.printf("[ArduinoOTA] Progress: %u%%\r", (progress / (total / 100)));
   });
   ArduinoOTA.onError([](ota_error_t error) {
     Serial.printf("[ArduinoOTA] Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    if (error == OTA_AUTH_ERROR)
+      Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR)
+      Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR)
+      Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR)
+      Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR)
+      Serial.println("End Failed");
   });
 
   ArduinoOTA.begin();
@@ -1094,7 +1154,8 @@ void setupArduinoOTA() {
 }
 
 void handleNotFound() {
-  server.send(404, "text/plain", "404: Route Not Found on ESP32 Telemetry Server");
+  server.send(404, "text/plain",
+              "404: Route Not Found on ESP32 Telemetry Server");
 }
 
 /* ====================================================================
@@ -1111,13 +1172,15 @@ void setup() {
 
   // Initialize Hardware Serial 2 for NEO-6M GPS (RX: 16, TX: 17)
   gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
-  Serial.printf("[GPS] Hardware Serial 2 started at %d baud (RX: GPIO%d, TX: GPIO%d)\n", 
-                GPS_BAUD, GPS_RX_PIN, GPS_TX_PIN);
+  Serial.printf(
+      "[GPS] Hardware Serial 2 started at %d baud (RX: GPIO%d, TX: GPIO%d)\n",
+      GPS_BAUD, GPS_RX_PIN, GPS_TX_PIN);
 
   // Initialize I2C and MPU-6050 IMU
   initMPU6050();
 
-  // Initialize Onboard LED (blinks while connecting, glows solid once connected)
+  // Initialize Onboard LED (blinks while connecting, glows solid once
+  // connected)
   pinMode(ONBOARD_LED_PIN, OUTPUT);
   digitalWrite(ONBOARD_LED_PIN, LOW);
 
@@ -1145,7 +1208,8 @@ void setup() {
     Serial.println("[WIFI] Connection timed out. Starting SoftAP Fallback...");
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASSWORD);
-    Serial.printf("[WIFI] SoftAP active! SSID: '%s' | Password: '%s'\n", AP_SSID, AP_PASSWORD);
+    Serial.printf("[WIFI] SoftAP active! SSID: '%s' | Password: '%s'\n",
+                  AP_SSID, AP_PASSWORD);
     Serial.print("[WIFI] Access at: http://");
     Serial.println(WiFi.softAPIP());
   }
@@ -1161,7 +1225,9 @@ void setup() {
   server.on("/api/data", HTTP_GET, handleData);
   server.on("/api/send_now", HTTP_GET, []() {
     sendTelemetryToServer();
-    server.send(200, "application/json", "{\"status\":\"TRIGGERED\",\"http_code\":" + String(lastServerHttpCode) + "}");
+    server.send(200, "application/json",
+                "{\"status\":\"TRIGGERED\",\"http_code\":" +
+                    String(lastServerHttpCode) + "}");
   });
   setupWebOTA();
   server.onNotFound(handleNotFound);
@@ -1180,7 +1246,9 @@ void loop() {
   if (WiFi.status() == WL_CONNECTED) {
     digitalWrite(ONBOARD_LED_PIN, HIGH); // Solid ON when Wi-Fi is connected
   } else {
-    digitalWrite(ONBOARD_LED_PIN, (millis() % 1000 < 150) ? HIGH : LOW); // Short pulse if disconnected
+    digitalWrite(ONBOARD_LED_PIN, (millis() % 1000 < 150)
+                                      ? HIGH
+                                      : LOW); // Short pulse if disconnected
   }
 
   // Feed GPS parser from Hardware Serial 2 & track arrival time
