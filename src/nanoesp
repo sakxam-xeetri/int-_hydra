@@ -66,15 +66,25 @@ const char* otaPassword = "admin";
  * ==================================================================== */
 #define RGB565(r, g, b) (((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3))
 
-#define COLOR_BLACK       0x0000
-#define COLOR_WHITE       0xFFFF
-#define COLOR_GREEN       RGB565(0, 255, 128)   // Vibrant Terminal Matrix Green
-#define COLOR_DARK_GREEN  RGB565(15, 65, 35)    // Muted Panel Outline Green
-#define COLOR_PANEL_BG    RGB565(8, 14, 10)     // Deep Cybernetic Black-Green
-#define COLOR_RED         RGB565(255, 45, 45)   // Critical Emergency Red
-#define COLOR_AMBER       RGB565(255, 180, 0)   // Warning Amber
-#define COLOR_CYAN        RGB565(0, 210, 255)   // Secondary Cyan
-#define COLOR_DARK_GRAY   RGB565(40, 45, 50)    // Inactive Gray
+#define COLOR_BLACK          0x0000
+#define COLOR_WHITE          0xFFFF
+
+// High-Contrast Green Palette for White Background (Crisp & Highly Readable)
+#define COLOR_GREEN_DARK     RGB565(0, 110, 35)    // Deep Emerald Green for Titles & Headers
+#define COLOR_GREEN_MAIN     RGB565(0, 150, 45)    // Vibrant Forest Green for Sensor Readouts
+#define COLOR_GREEN_BORDER   RGB565(0, 160, 60)    // Crisp Green for Card Outlines & Dividers
+#define COLOR_GREEN_MUTED    RGB565(40, 130, 65)   // Muted Green for Secondary Details
+#define COLOR_GREEN_TERMINAL RGB565(0, 255, 128)   // Terminal Matrix Green (Boot & Alerts)
+
+// Compatibility aliases
+#define COLOR_GREEN          COLOR_GREEN_MAIN
+#define COLOR_DARK_GREEN     COLOR_GREEN_DARK
+#define COLOR_PANEL_BG       RGB565(8, 14, 10)     // Deep Cybernetic Black-Green (Alert Box)
+
+#define COLOR_RED            RGB565(220, 30, 30)   // Critical Emergency Red
+#define COLOR_AMBER          RGB565(240, 150, 0)   // Warning Amber
+#define COLOR_CYAN           RGB565(0, 180, 220)   // Secondary Cyan
+#define COLOR_DARK_GRAY      RGB565(90, 100, 95)   // Soft Gray
 
 int screenWidth  = 480;
 int screenHeight = 320;
@@ -337,9 +347,37 @@ void drawChar(int16_t x, int16_t y, char c, uint16_t color, uint8_t size) {
   }
 }
 
+void drawChar(int16_t x, int16_t y, char c, uint16_t color, uint16_t bg, uint8_t size) {
+  if (c < 32 || c > 127) c = ' ';
+  uint8_t idx = c - 32;
+  // Pre-fill character bounding cell to avoid ghost pixels during updates
+  fillRect(x, y, 6 * size, 8 * size, bg);
+  for (int col = 0; col < 5; col++) {
+    uint8_t line = pgm_read_byte(&font5x7[idx][col]);
+    for (int row = 0; row < 7; row++) {
+      if (line & (1 << row)) {
+        if (size == 1) {
+          if (x + col >= 0 && x + col < screenWidth && y + row >= 0 && y + row < screenHeight) {
+            fillRect(x + col, y + row, 1, 1, color);
+          }
+        } else {
+          fillRect(x + col * size, y + row * size, size, size, color);
+        }
+      }
+    }
+  }
+}
+
 void drawText(int16_t x, int16_t y, const char *text, uint16_t color, uint8_t size) {
   while (*text) {
     drawChar(x, y, *text++, color, size);
+    x += 6 * size;
+  }
+}
+
+void drawText(int16_t x, int16_t y, const char *text, uint16_t color, uint16_t bg, uint8_t size) {
+  while (*text) {
+    drawChar(x, y, *text++, color, bg, size);
     x += 6 * size;
   }
 }
@@ -350,147 +388,208 @@ void drawTextCentered(int16_t y, const char *text, uint16_t color, uint8_t size)
   drawText(x, y, text, color, size);
 }
 
+void drawTextCentered(int16_t y, const char *text, uint16_t color, uint16_t bg, uint8_t size) {
+  int16_t x = (screenWidth - strlen(text) * 6 * size) / 2;
+  if (x < 0) x = 0;
+  drawText(x, y, text, color, bg, size);
+}
+
 /* ====================================================================
  * 8. UI SCREEN RENDERERS
  * ==================================================================== */
 
-// --- BOOT UP LOGGING SCREEN (Black BG, White & Green Text) ---
-int bootLogY = 70;
-void bootLogMessage(const char* label, const char* status, uint16_t statusColor = COLOR_GREEN) {
-  drawText(20, bootLogY, label, COLOR_WHITE, 1);
-  drawText(380, bootLogY, status, statusColor, 1);
-  bootLogY += 16;
+// --- BOOT UP SCREEN (Black BG, Large Crisp White HYDRA Branding) ---
+int bootLogY = 148;
+void bootLogMessage(const char* label, const char* status, uint16_t statusColor = COLOR_GREEN_TERMINAL) {
+  drawText(30, bootLogY, label, COLOR_WHITE, COLOR_BLACK, 1);
+  drawText(390, bootLogY, status, statusColor, COLOR_BLACK, 1);
+  bootLogY += 18;
   delay(120);
 }
 
 void renderBootScreenHeader() {
   fillScreen(COLOR_BLACK);
-  drawRect(10, 10, screenWidth - 20, screenHeight - 20, COLOR_GREEN);
-  drawRect(12, 12, screenWidth - 24, screenHeight - 24, COLOR_DARK_GREEN);
 
-  drawTextCentered(24, "================================================", COLOR_DARK_GREEN, 1);
-  drawTextCentered(36, "HYDRA DISASTER MITIGATION COMMAND NETWORK", COLOR_GREEN, 2);
-  drawTextCentered(54, "LEVEL 2 PEOC URBAN HUB  //  ARDUINO NANO ESP32", COLOR_WHITE, 1);
-  drawHLine(20, 66, screenWidth - 40, COLOR_GREEN);
+  // Large White HYDRA Title (Size 6: ~174px wide, 42px tall)
+  drawTextCentered(38, "HYDRA", COLOR_WHITE, COLOR_BLACK, 6);
+
+  // Clean, modern white subtitle
+  drawTextCentered(96, "EARLY WARNING & DISASTER MITIGATION NETWORK", COLOR_WHITE, COLOR_BLACK, 1);
+  drawTextCentered(112, "LEVEL 2 PEOC COMMAND NODE  //  ARDUINO NANO ESP32", COLOR_WHITE, COLOR_BLACK, 1);
+
+  // Clean minimalist white divider
+  drawHLine(30, 132, screenWidth - 60, COLOR_WHITE);
+  bootLogY = 148;
+
+  drawTextCentered(296, "SYSTEM INITIALIZING...", COLOR_WHITE, COLOR_BLACK, 1);
 }
 
-// --- MAIN TELEMETRY DATA SCREEN ---
-void renderDataScreen() {
-  fillScreen(COLOR_BLACK);
+// --- MAIN TELEMETRY DATA SCREEN (White BG, High-Contrast Green Text) ---
+bool dashboardStaticDrawn = false;
 
-  // 1. TOP HEADER STATUS BAR (Height: 28px)
-  fillRect(0, 0, screenWidth, 26, COLOR_PANEL_BG);
-  drawHLine(0, 26, screenWidth, COLOR_GREEN);
+void renderDataScreenStatic() {
+  fillScreen(COLOR_WHITE);
 
-  drawText(10, 8, "HYDRA PEOC COMMAND", COLOR_GREEN, 1);
-  drawText(130, 8, "[POKHARA REGIONAL]", COLOR_WHITE, 1);
+  // 1. Top Header Bar (Y: 0 to 32)
+  drawHLine(0, 32, screenWidth, COLOR_GREEN_BORDER);
+  drawHLine(0, 33, screenWidth, COLOR_GREEN_BORDER);
+  drawText(12, 8, "HYDRA SENSOR NODE", COLOR_GREEN_DARK, COLOR_WHITE, 2);
 
+  // 2. Card 1: Environment Sensors / Fire (Top Left: X=8, Y=40, W=228, H=122)
+  drawRect(8, 40, 228, 122, COLOR_GREEN_BORDER);
+  drawRect(9, 41, 226, 120, COLOR_GREEN_BORDER);
+  drawText(16, 46, "[ 01 ENVIRONMENT SENSORS ]", COLOR_GREEN_DARK, COLOR_WHITE, 1);
+  drawHLine(8, 58, 228, COLOR_GREEN_BORDER);
+
+  drawText(16, 66, "TEMP :", COLOR_GREEN_DARK, COLOR_WHITE, 2);
+  drawText(16, 90, "HUM  :", COLOR_GREEN_DARK, COLOR_WHITE, 2);
+  drawText(16, 114, "GAS/SMOKE: ", COLOR_GREEN_MUTED, COLOR_WHITE, 1);
+  drawText(16, 128, "AIR QUAL : ", COLOR_GREEN_MUTED, COLOR_WHITE, 1);
+  drawText(16, 142, "STATION  : PINE RIDGE (FIRE-01)", COLOR_GREEN_MUTED, COLOR_WHITE, 1);
+
+  // 3. Card 2: Hydrology & Flood (Top Right: X=244, Y=40, W=228, H=122)
+  drawRect(244, 40, 228, 122, COLOR_GREEN_BORDER);
+  drawRect(245, 41, 226, 120, COLOR_GREEN_BORDER);
+  drawText(252, 46, "[ 02 WATER LEVEL & FLOOD ]", COLOR_GREEN_DARK, COLOR_WHITE, 1);
+  drawHLine(244, 58, 228, COLOR_GREEN_BORDER);
+
+  drawText(252, 66, "DEPTH:", COLOR_GREEN_DARK, COLOR_WHITE, 2);
+  drawText(252, 90, "CLEAR:", COLOR_GREEN_DARK, COLOR_WHITE, 2);
+  drawText(252, 114, "RADAR ZONE: ", COLOR_GREEN_MUTED, COLOR_WHITE, 1);
+  drawText(252, 128, "SURGE STAT: ", COLOR_GREEN_MUTED, COLOR_WHITE, 1);
+  drawText(252, 142, "STATION   : MODI KHOLA (FLOOD-01)", COLOR_GREEN_MUTED, COLOR_WHITE, 1);
+
+  // 4. Card 3: Geolocation & Motion (Bottom Full Width: X=8, Y=168, W=464, H=118)
+  drawRect(8, 168, 464, 118, COLOR_GREEN_BORDER);
+  drawRect(9, 169, 462, 116, COLOR_GREEN_BORDER);
+  drawText(16, 174, "[ 03 GEOLOCATION & MOTION // LANDSLIDE ]", COLOR_GREEN_DARK, COLOR_WHITE, 1);
+  drawHLine(8, 186, 464, COLOR_GREEN_BORDER);
+  drawVLine(240, 186, 100, COLOR_GREEN_BORDER);
+
+  // Left Sub-Column (GPS)
+  drawText(16, 194, "LAT :", COLOR_GREEN_DARK, COLOR_WHITE, 2);
+  drawText(16, 218, "LONG:", COLOR_GREEN_DARK, COLOR_WHITE, 2);
+  drawText(16, 242, "ALTITUDE : ", COLOR_GREEN_MUTED, COLOR_WHITE, 1);
+  drawText(16, 256, "SATS/SPD : ", COLOR_GREEN_MUTED, COLOR_WHITE, 1);
+  drawText(16, 270, "GPS LINK : ", COLOR_GREEN_MUTED, COLOR_WHITE, 1);
+
+  // Right Sub-Column (IMU)
+  drawText(248, 194, "TILT:", COLOR_GREEN_DARK, COLOR_WHITE, 2);
+  drawText(248, 218, "PITCH/ROLL: ", COLOR_GREEN_MUTED, COLOR_WHITE, 1);
+  drawText(248, 234, "TOTAL ACC : ", COLOR_GREEN_MUTED, COLOR_WHITE, 1);
+  drawText(248, 250, "MPU-6050  : 6-DOF SENSOR ACTIVE", COLOR_GREEN_MUTED, COLOR_WHITE, 1);
+  drawText(248, 268, "SEISMIC   : ", COLOR_GREEN_MUTED, COLOR_WHITE, 1);
+
+  // 5. Footer Bar (Y: 294 to 320)
+  drawHLine(0, 294, screenWidth, COLOR_GREEN_BORDER);
+  drawHLine(0, 295, screenWidth, COLOR_GREEN_BORDER);
+
+  dashboardStaticDrawn = true;
+}
+
+void renderDataScreenValues() {
+  // Header Values
   String ipStr = "IP: " + (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("AP-MODE"));
-  drawText(260, 8, ipStr.c_str(), COLOR_WHITE, 1);
+  char ipBuf[32];
+  snprintf(ipBuf, sizeof(ipBuf), "%-22s", ipStr.c_str());
+  drawText(280, 6, ipBuf, COLOR_GREEN_MAIN, COLOR_WHITE, 1);
 
-  String sysBadge = sysStatus.isEmergency ? "EMERGENCY!" : "SYS:NOMINAL";
-  uint16_t badgeColor = sysStatus.isEmergency ? COLOR_RED : COLOR_GREEN;
-  drawText(screenWidth - 85, 8, sysBadge.c_str(), badgeColor, 1);
+  String sysBadge = sysStatus.isEmergency ? "STATUS: EMERGENCY!" : "STATUS: NOMINAL";
+  char badgeBuf[32];
+  snprintf(badgeBuf, sizeof(badgeBuf), "%-22s", sysBadge.c_str());
+  drawText(280, 18, badgeBuf, sysStatus.isEmergency ? COLOR_RED : COLOR_GREEN_MAIN, COLOR_WHITE, 1);
 
-  // 2. PANEL 1: FLOOD STATION (Upper Left: x=8, y=32, w=228, h=126)
-  int p1X = 8, p1Y = 32, p1W = 228, p1H = 126;
-  drawRect(p1X, p1Y, p1W, p1H, COLOR_DARK_GREEN);
-  fillRect(p1X + 1, p1Y + 1, p1W - 2, 20, COLOR_PANEL_BG);
-  drawHLine(p1X, p1Y + 21, p1W, COLOR_DARK_GREEN);
+  // Card 1: Environment Values (Fire Station)
+  char tempStr[16];
+  snprintf(tempStr, sizeof(tempStr), "%-7.1f C", fireData.tempC);
+  drawText(92, 66, tempStr, COLOR_GREEN_MAIN, COLOR_WHITE, 2);
 
-  drawText(p1X + 8, p1Y + 6, "01 FLOOD // MODI KHOLA", COLOR_GREEN, 1);
-  bool floodCritical = (floodData.status == "CRITICAL_BREACH" || floodData.waterDepthCm > 250.0);
-  drawText(p1X + p1W - 55, p1Y + 6, floodCritical ? "BREACH" : "NORMAL", floodCritical ? COLOR_RED : COLOR_GREEN, 1);
+  char humStr[16];
+  snprintf(humStr, sizeof(humStr), "%-7.1f %%", fireData.humidityPct);
+  drawText(92, 90, humStr, COLOR_GREEN_MAIN, COLOR_WHITE, 2);
 
-  char depthStr[32];
-  snprintf(depthStr, sizeof(depthStr), "%.1f", floodData.waterDepthCm);
-  drawText(p1X + 10, p1Y + 32, depthStr, floodCritical ? COLOR_RED : COLOR_WHITE, 3);
-  drawText(p1X + 110, p1Y + 42, "cm DEPTH", COLOR_GREEN, 1);
+  char gasStr[24];
+  snprintf(gasStr, sizeof(gasStr), "%-14.1f PPM", fireData.gasPpm);
+  drawText(92, 114, gasStr, (fireData.gasPpm > 400.0) ? COLOR_RED : COLOR_GREEN_MAIN, COLOR_WHITE, 1);
 
-  char clearStr[32];
-  snprintf(clearStr, sizeof(clearStr), "CLEARANCE: %.1f cm", floodData.clearanceCm);
-  drawText(p1X + 10, p1Y + 70, clearStr, COLOR_WHITE, 1);
+  char airBuf[24];
+  snprintf(airBuf, sizeof(airBuf), "%-14s", fireData.airQuality.substring(0, 14).c_str());
+  drawText(92, 128, airBuf, COLOR_GREEN_MAIN, COLOR_WHITE, 1);
 
-  String zoneStr = "ZONE: " + floodData.radarZone.substring(0, 20);
-  drawText(p1X + 10, p1Y + 86, zoneStr.c_str(), COLOR_WHITE, 1);
+  // Card 2: Flood Values
+  char depthStr[16];
+  snprintf(depthStr, sizeof(depthStr), "%-7.1f cm", floodData.waterDepthCm);
+  drawText(328, 66, depthStr, (floodData.waterDepthCm > 250.0) ? COLOR_RED : COLOR_GREEN_MAIN, COLOR_WHITE, 2);
 
-  String syncF = "SYNC: " + floodData.lastSync;
-  drawText(p1X + 10, p1Y + 104, syncF.c_str(), COLOR_GREEN, 1);
+  char clearStr[16];
+  snprintf(clearStr, sizeof(clearStr), "%-7.1f cm", floodData.clearanceCm);
+  drawText(328, 90, clearStr, COLOR_GREEN_MAIN, COLOR_WHITE, 2);
 
-  // 3. PANEL 2: FIRE STATION (Upper Right: x=244, y=32, w=228, h=126)
-  int p2X = 244, p2Y = 32, p2W = 228, p2H = 126;
-  drawRect(p2X, p2Y, p2W, p2H, COLOR_DARK_GREEN);
-  fillRect(p2X + 1, p2Y + 1, p2W - 2, 20, COLOR_PANEL_BG);
-  drawHLine(p2X, p2Y + 21, p2W, COLOR_DARK_GREEN);
+  char zoneBuf[20];
+  snprintf(zoneBuf, sizeof(zoneBuf), "%-12s", floodData.radarZone.substring(0, 12).c_str());
+  drawText(330, 114, zoneBuf, COLOR_GREEN_MAIN, COLOR_WHITE, 1);
 
-  drawText(p2X + 8, p2Y + 6, "02 FIRE // PINE RIDGE", COLOR_GREEN, 1);
-  bool fireCritical = (fireData.status == "CRITICAL_BREACH" || fireData.gasPpm > 400.0);
-  drawText(p2X + p2W - 55, p2Y + 6, fireCritical ? "HAZARD" : "NORMAL", fireCritical ? COLOR_RED : COLOR_GREEN, 1);
+  char fstatBuf[20];
+  snprintf(fstatBuf, sizeof(fstatBuf), "%-12s", floodData.status.c_str());
+  drawText(330, 128, fstatBuf, (floodData.status == "CRITICAL_BREACH") ? COLOR_RED : COLOR_GREEN_MAIN, COLOR_WHITE, 1);
 
-  char envStr[32];
-  snprintf(envStr, sizeof(envStr), "%.1fC", fireData.tempC);
-  drawText(p2X + 10, p2Y + 32, envStr, COLOR_WHITE, 3);
+  // Card 3: Geolocation & Motion Values
+  // Left Sub-Column (GPS)
+  char latStr[20];
+  snprintf(latStr, sizeof(latStr), "%-11.5f N", landslideData.lat);
+  drawText(80, 194, latStr, COLOR_GREEN_MAIN, COLOR_WHITE, 2);
 
-  char humStr[32];
-  snprintf(humStr, sizeof(humStr), "HUM: %.1f%%", fireData.humidityPct);
-  drawText(p2X + 110, p2Y + 42, humStr, COLOR_GREEN, 1);
+  char lngStr[20];
+  snprintf(lngStr, sizeof(lngStr), "%-11.5f E", landslideData.lng);
+  drawText(80, 218, lngStr, COLOR_GREEN_MAIN, COLOR_WHITE, 2);
 
-  char gasStr[32];
-  snprintf(gasStr, sizeof(gasStr), "SMOKE/GAS: %.1f PPM", fireData.gasPpm);
-  drawText(p2X + 10, p2Y + 70, gasStr, fireCritical ? COLOR_RED : COLOR_WHITE, 1);
+  char altStr[24];
+  snprintf(altStr, sizeof(altStr), "%-14.1f m", landslideData.altM);
+  drawText(90, 242, altStr, COLOR_GREEN_MAIN, COLOR_WHITE, 1);
 
-  String airStr = "AIR: " + fireData.airQuality.substring(0, 22);
-  drawText(p2X + 10, p2Y + 86, airStr.c_str(), COLOR_WHITE, 1);
+  char satStr[28];
+  snprintf(satStr, sizeof(satStr), "%d SATS | %.1f km/h  ", landslideData.satellites, landslideData.speedKmh);
+  drawText(90, 256, satStr, COLOR_GREEN_MAIN, COLOR_WHITE, 1);
 
-  String syncFi = "SYNC: " + fireData.lastSync;
-  drawText(p2X + 10, p2Y + 104, syncFi.c_str(), COLOR_GREEN, 1);
+  const char* fixStr = landslideData.gpsFix ? "FIX 3D ACQUIRED  " : "SEARCHING LOCK...";
+  drawText(90, 270, fixStr, COLOR_GREEN_MAIN, COLOR_WHITE, 1);
 
-  // 4. PANEL 3: LANDSLIDE & SEISMIC (Bottom: x=8, y=164, w=464, h=124)
-  int p3X = 8, p3Y = 164, p3W = 464, p3H = 124;
-  drawRect(p3X, p3Y, p3W, p3H, COLOR_DARK_GREEN);
-  fillRect(p3X + 1, p3Y + 1, p3W - 2, 20, COLOR_PANEL_BG);
-  drawHLine(p3X, p3Y + 21, p3W, COLOR_DARK_GREEN);
+  // Right Sub-Column (IMU)
+  char tiltStr[16];
+  snprintf(tiltStr, sizeof(tiltStr), "%-7.1f deg", landslideData.tiltDeg);
+  drawText(312, 194, tiltStr, (landslideData.tiltDeg > 15.0) ? COLOR_RED : COLOR_GREEN_MAIN, COLOR_WHITE, 2);
 
-  drawText(p3X + 8, p3Y + 6, "03 LANDSLIDE & SEISMIC // ANNAPURNA ESCARPMENT", COLOR_GREEN, 1);
-  bool lsCritical = (landslideData.tiltDeg > 15.0 || landslideData.totalAccelG > 2.0);
-  drawText(p3X + p3W - 55, p3Y + 6, lsCritical ? "WARNING" : "NORMAL", lsCritical ? COLOR_RED : COLOR_GREEN, 1);
+  char prStr[32];
+  snprintf(prStr, sizeof(prStr), "%+5.1f / %+5.1f deg ", landslideData.pitchDeg, landslideData.rollDeg);
+  drawText(326, 218, prStr, COLOR_GREEN_MAIN, COLOR_WHITE, 1);
 
-  // Sub-column 1: 6-DOF IMU
-  drawText(p3X + 10, p3Y + 30, "[ MPU-6050 6-DOF IMU ]", COLOR_GREEN, 1);
-  char imuStr1[48];
-  snprintf(imuStr1, sizeof(imuStr1), "PITCH: %+.1f deg  ROLL: %+.1f deg", landslideData.pitchDeg, landslideData.rollDeg);
-  drawText(p3X + 10, p3Y + 48, imuStr1, COLOR_WHITE, 1);
+  char accStr[28];
+  snprintf(accStr, sizeof(accStr), "%.2f G (%s)   ", landslideData.totalAccelG, (landslideData.totalAccelG > 1.8 ? "SHOCK" : "NOMINAL"));
+  drawText(326, 234, accStr, COLOR_GREEN_MAIN, COLOR_WHITE, 1);
 
-  char imuStr2[48];
-  snprintf(imuStr2, sizeof(imuStr2), "TOTAL TILT: %.1f deg  ACCEL: %.2f G", landslideData.tiltDeg, landslideData.totalAccelG);
-  drawText(p3X + 10, p3Y + 64, imuStr2, COLOR_WHITE, 1);
+  const char* seisStr = (landslideData.tiltDeg > 15.0) ? "ALERT: DISPLACEMENT" : "NORMAL / STABLE    ";
+  drawText(326, 268, seisStr, (landslideData.tiltDeg > 15.0) ? COLOR_RED : COLOR_GREEN_MAIN, COLOR_WHITE, 1);
 
-  // Sub-column 2: NEO-6M GPS
-  drawText(p3X + 10, p3Y + 84, "[ NEO-6M SATELLITE GPS ]", COLOR_GREEN, 1);
-  char gpsStr1[64];
-  snprintf(gpsStr1, sizeof(gpsStr1), "COORDS: %.5f N, %.5f E", landslideData.lat, landslideData.lng);
-  drawText(p3X + 10, p3Y + 98, gpsStr1, COLOR_WHITE, 1);
-
-  char gpsStr2[64];
-  snprintf(gpsStr2, sizeof(gpsStr2), "ALT: %.1f m | SPEED: %.1f km/h | SATS: %d", landslideData.altM, landslideData.speedKmh, landslideData.satellites);
-  drawText(p3X + 240, p3Y + 98, gpsStr2, COLOR_GREEN, 1);
-
-  // 5. BOTTOM FOOTER BAR (Height: 24px)
-  fillRect(0, screenHeight - 24, screenWidth, 24, COLOR_PANEL_BG);
-  drawHLine(0, screenHeight - 24, screenWidth, COLOR_GREEN);
-
+  // Footer Bar Values
   char sirenBuf[32];
-  snprintf(sirenBuf, sizeof(sirenBuf), "SIREN: [%s]", sysStatus.sirenState.c_str());
-  drawText(10, screenHeight - 16, sirenBuf, sysStatus.sirenState == "ON" ? COLOR_RED : COLOR_GREEN, 1);
+  snprintf(sirenBuf, sizeof(sirenBuf), "SIREN: [%s]  ", sysStatus.sirenState.c_str());
+  drawText(12, 302, sirenBuf, (sysStatus.sirenState == "ON" ? COLOR_RED : COLOR_GREEN_MAIN), COLOR_WHITE, 1);
 
-  char linkBuf[48];
-  snprintf(linkBuf, sizeof(linkBuf), "VILLAGE LINK: %s", sysStatus.villageNodeLink.c_str());
-  drawText(120, screenHeight - 16, linkBuf, COLOR_WHITE, 1);
+  char linkBuf[36];
+  snprintf(linkBuf, sizeof(linkBuf), "VILLAGE LINK: %-8s", sysStatus.villageNodeLink.c_str());
+  drawText(130, 302, linkBuf, COLOR_GREEN_MAIN, COLOR_WHITE, 1);
 
-  char syncBuf[48];
+  char pollBuf[48];
   unsigned long uptimeSec = millis() / 1000;
-  snprintf(syncBuf, sizeof(syncBuf), "POLLS: #%lu (UP: %02lu:%02lu:%02lu)", sysStatus.syncCount, uptimeSec / 3600, (uptimeSec % 3600) / 60, uptimeSec % 60);
-  drawText(screenWidth - 195, screenHeight - 16, syncBuf, COLOR_GREEN, 1);
+  snprintf(pollBuf, sizeof(pollBuf), "SYNC #%lu (UP: %02lu:%02lu:%02lu) ", sysStatus.syncCount, uptimeSec / 3600, (uptimeSec % 3600) / 60, uptimeSec % 60);
+  drawText(285, 302, pollBuf, COLOR_GREEN_MUTED, COLOR_WHITE, 1);
+}
+
+void renderDataScreen(bool forceRedraw = false) {
+  if (forceRedraw || !dashboardStaticDrawn) {
+    renderDataScreenStatic();
+  }
+  renderDataScreenValues();
 }
 
 // --- CRITICAL ALERT POP-UP SCREEN ---
@@ -818,7 +917,7 @@ void setup() {
 
   // Transition to main dashboard
   currentScreen = SCREEN_DASHBOARD;
-  renderDataScreen();
+  renderDataScreen(true);
   lastScreenSwitchTime = millis();
 }
 
@@ -839,20 +938,20 @@ void loop() {
         if (alertDisplayState) {
           renderAlertScreen();
         } else {
-          renderDataScreen();
+          renderDataScreen(true);
         }
       } else {
         // Redraw current active view with fresh data
         if (alertDisplayState) {
           renderAlertScreen();
         } else {
-          renderDataScreen();
+          renderDataScreen(false);
         }
       }
     } else {
-      // Normal nominal monitoring: keep rendering Data Screen
+      // Normal nominal monitoring: keep rendering Data Screen with smooth differential update
       alertDisplayState = false;
-      renderDataScreen();
+      renderDataScreen(false);
     }
   }
 }
