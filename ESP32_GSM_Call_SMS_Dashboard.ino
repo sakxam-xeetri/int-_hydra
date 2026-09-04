@@ -68,7 +68,7 @@ int cloudPollFailCount = 0;
 // Siren / Buzzer Drive Polarity:
 // Set to 'true' if Buzzer (+) is connected to 3.3V/VCC and (-) to GPIO 14 (Active-LOW: LOW = ON, HIGH = OFF)
 // Set to 'false' if Buzzer (+) is connected to GPIO 14 and (-) to GND (Active-HIGH: HIGH = ON, LOW = OFF)
-#define SIREN_ACTIVE_LOW true
+#define SIREN_ACTIVE_LOW false
 
 #define GSM_BAUD_RATE 9600
 
@@ -116,6 +116,7 @@ enum AlertLedState  { ALERT_OFF, ALERT_ON, ALERT_BLINK, ALERT_STROBE };
 StatusLedState statusLedMode = STATUS_HEARTBEAT;
 AlertLedState  alertLedMode  = ALERT_OFF;
 bool sirenActive = false;
+unsigned long manualOverrideUntil = 0; // Manual web dashboard override lock timer
 
 // Recent Action Feedback
 String lastActionResult = "GATEWAY READY";
@@ -221,6 +222,7 @@ String sendATCommand(String cmd, unsigned long timeoutMs = 2000, String expected
   unsigned long start = millis();
   
   while (millis() - start < timeoutMs) {
+    updateHardwareOutputs();
     while (gsmSerial.available()) {
       char c = gsmSerial.read();
       response += c;
@@ -228,6 +230,7 @@ String sendATCommand(String cmd, unsigned long timeoutMs = 2000, String expected
     if (expectedReply.length() > 0 && response.indexOf(expectedReply) >= 0) {
       break;
     }
+    delay(10);
   }
 
   response.trim();
@@ -426,6 +429,7 @@ bool gsmSendSMS(String phoneNumber, String message) {
   String smsResp = "";
   unsigned long startDelivery = millis();
   while (millis() - startDelivery < 15000) {
+    updateHardwareOutputs();
     while (gsmSerial.available()) {
       char c = gsmSerial.read();
       smsResp += c;
@@ -433,6 +437,7 @@ bool gsmSendSMS(String phoneNumber, String message) {
     if (smsResp.indexOf("OK") >= 0 || smsResp.indexOf("ERROR") >= 0) {
       break;
     }
+    delay(10);
   }
 
   smsResp.trim();
@@ -474,6 +479,9 @@ bool triggerAlert(String node, String level, String msg, String targetNum, bool 
     sirenActive = false;
   }
 
+  // Force immediate hardware output update
+  updateHardwareOutputs();
+
   bool smsResult = true;
   bool callResult = true;
 
@@ -507,10 +515,14 @@ void clearAlert() {
   alertLedMode = ALERT_OFF;
   sirenActive = false;
   lastDispatchedAlertType = ""; // Reset dispatch tracker on clear
+  manualOverrideUntil = 0;      // Release manual dashboard override lock
 
   if (activeCallState.indexOf("CALL IN PROGRESS") >= 0 || activeCallState.indexOf("DIALING") >= 0) {
     gsmHangupCall();
   }
+
+  // Force immediate hardware output update
+  updateHardwareOutputs();
 
   lastActionResult = "ALERT CLEARED / DISARMED";
   lastActionSuccess = true;
@@ -523,6 +535,7 @@ void clearAlert() {
  * ==================================================================== */
 void pollLevel1CloudServer() {
   if (WiFi.status() != WL_CONNECTED || isOperationInProgress) return;
+  if (millis() < manualOverrideUntil) return; // Respect local web dashboard manual overrides
 
   WiFiClientSecure client;
   client.setInsecure(); // Bypass SSL certificate verification for production endpoint
@@ -547,19 +560,40 @@ void pollLevel1CloudServer() {
     if (!error && doc["status"] == "SUCCESS") {
       JsonObject data = doc["data"];
 
-      bool emergency = data["emergency"] | false;
-      const char* sirenStr = data["siren"] | "OFF";
+      bool emergency = false;
+      if (data["emergency"].is<bool>()) {
+        emergency = data["emergency"].as<bool>();
+      } else if (data["emergency"].is<String>()) {
+        String emStr = data["emergency"].as<String>();
+        emStr.toLowerCase();
+        emergency = (emStr == "true" || emStr == "1" || emStr == "yes" || emStr == "on");
+      } else if (data["emergency"].is<int>()) {
+        emergency = (data["emergency"].as<int>() == 1);
+      }
+
+      String sirenVal = "OFF";
+      if (!data["siren"].isNull()) {
+        sirenVal = data["siren"].as<String>();
+      }
+      sirenVal.trim();
+      sirenVal.toUpperCase();
+
+      bool sirenOnRequested = (sirenVal == "ON" || sirenVal == "1" || sirenVal == "TRUE" || sirenVal == "YES");
+
       cloudEmergencyActive = emergency;
-      cloudSirenState = String(sirenStr);
+      cloudSirenState = sirenVal;
 
       // 1. Siren & Strobe Hardware Control
-      if (emergency || strcmp(sirenStr, "ON") == 0) {
+      if (emergency || sirenOnRequested) {
         isAlertActive = true;
         alertLevel = "EMERGENCY";
         alertSourceNode = data["node"] | "LEVEL_1_VILLAGE_MASTER";
         alertMessage = data["breach_summary"] | "DISASTER ALERT TRIGGERED";
         alertLedMode = ALERT_STROBE;
         sirenActive = true;
+
+        // Force immediate hardware output update before call/SMS routines
+        updateHardwareOutputs();
 
         String serverAlertType = data["breach_summary"] | "EMERGENCY_DISASTER";
         String targetPhone = defaultBootCallNumber;
@@ -592,6 +626,9 @@ void pollLevel1CloudServer() {
         alertLedMode = ALERT_OFF;
         sirenActive = false;
         lastDispatchedAlertType = "";
+
+        // Force immediate hardware output update
+        updateHardwareOutputs();
       }
 
       if (!data["breach_summary"].isNull()) {
@@ -1536,6 +1573,7 @@ void handleLed() {
     else if (mode == "strobe") alertLedMode = ALERT_STROBE;
     else if (mode == "blink") alertLedMode = ALERT_BLINK;
     else alertLedMode = ALERT_OFF;
+    manualOverrideUntil = millis() + 45000;
   }
 
   if (server.hasArg("status")) {
@@ -1552,7 +1590,17 @@ void handleLed() {
     String val = server.arg("siren");
     val.toLowerCase();
     sirenActive = (val == "on" || val == "true" || val == "1");
+    if (sirenActive) {
+      isAlertActive = true;
+      alertLevel = "MANUAL_OVERRIDE";
+      alertSourceNode = "WEB_DASHBOARD";
+      alertMessage = "MANUAL SIREN ACTIVATED FROM DASHBOARD";
+    }
+    manualOverrideUntil = millis() + 45000;
   }
+
+  // Force immediate hardware output update
+  updateHardwareOutputs();
 
   server.send(200, "application/json", "{\"success\":true,\"siren_active\":" + String(sirenActive ? "true" : "false") + "}");
 }

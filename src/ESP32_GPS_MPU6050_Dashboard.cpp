@@ -12,6 +12,7 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
